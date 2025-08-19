@@ -21,9 +21,7 @@ import sys # To check the operating system
 
 def get_mime_type(filename):
     """Gets the MIME type from a filename extension."""
-    # Get the file extension (e.g., '.jpg', '.png') and convert to lowercase
     ext = os.path.splitext(filename)[1].lower()
-    # Return the correct MIME type based on the extension
     if ext in ['.jpg', '.jpeg']: return 'image/jpeg'
     elif ext == '.png': return 'image/png'
     elif ext == '.webp': return 'image/webp'
@@ -31,49 +29,32 @@ def get_mime_type(filename):
 
 def parse_whatsapp_zip(zip_path):
     """Parses an exported WhatsApp .zip chat archive."""
-    # Create empty lists to store the parsed messages and list of images
     messages, image_list = [], []
-    # Define the file extensions for images we want to process
     image_extensions = ('.jpg', '.jpeg', '.png', '.webp')
-    # Define a regular expression to match a line in the WhatsApp chat file.
     pattern = re.compile(r"^(\d{1,2}/\d{1,2}/\d{4}, \d{2}:\d{2}) - (.*?): (.*?)(?:\s*\(file attached\))?$")
 
     try:
-        # Open the provided zip file in read mode
         with zipfile.ZipFile(zip_path, 'r') as zf:
-            # Find the main chat text file inside the zip archive by its extension
             chat_filename = next((name for name in zf.namelist() if name.endswith('.txt')), None)
-            # If a .txt file wasn't found, raise an error
             if not chat_filename: raise FileNotFoundError("Could not find a .txt chat file in the zip archive.")
             
-            # Get a list of all image files in the zip
             image_list = [name for name in zf.namelist() if name.lower().endswith(image_extensions)]
 
-            # Open the chat file from within the zip
             with zf.open(chat_filename) as chat_file:
-                # Wrap the file to handle text encoding properly
                 chat_content = io.TextIOWrapper(chat_file, encoding='utf-8')
-                # Read the chat file line by line
                 for line in chat_content:
-                    # Try to match our pattern against the current line
                     match = pattern.match(line.strip())
-                    if match: # If the line matches our expected format
-                        # Extract the different parts from the match
+                    if match:
                         datetime_str, author, message_text = match.groups()
-                        # Check if the message text is a filename that exists in our image list
                         image_filename = message_text if message_text in image_list else None
                         try:
-                            # Convert the date/time string into a proper datetime object
                             dt_obj = datetime.strptime(datetime_str, '%d/%m/%Y, %H:%M')
-                            # Add the parsed message details to our list of messages
                             messages.append({'timestamp': dt_obj, 'author': author.strip(), 'message': message_text.strip(), 'image_filename': image_filename})
                         except ValueError: continue
     except Exception as e:
-        # If any other error occurs while parsing, show an error message
         messagebox.showerror("Parsing Error", f"Failed to parse zip file: {e}")
         return [], []
         
-    # Return the final list of parsed messages and the list of image files
     return messages, image_list
 
 def filter_messages_by_time(messages, time_range_str):
@@ -91,7 +72,7 @@ def format_chat_for_summary(messages):
     """Formats a list of message dictionaries into a single string for the AI."""
     return "\n".join([f"[{msg['timestamp'].strftime('%Y-%m-%d %H:%M')}] {msg['author']}: {'[Image Sent]' if msg['image_filename'] else msg['message']}" for msg in messages])
 
-def get_summary_from_gemini(api_key, chat_text, zip_path=None, image_filenames=None):
+def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, image_filenames=None):
     """Uses the Gemini API to get a structured summary of the chat."""
     if not api_key: raise ValueError("API key is missing.")
     if not chat_text: return None
@@ -102,11 +83,17 @@ def get_summary_from_gemini(api_key, chat_text, zip_path=None, image_filenames=N
         
         json_schema = {"type": "object", "properties": {"summary_parts": {"type": "array", "items": {"type": "object", "properties": {"type": {"type": "string", "enum": ["text", "key_message"]}, "content": {"type": "string"}, "author": {"type": "string"}}, "required": ["type", "content"]}}, "bullet_points": {"type": "array", "items": {"type": "string"}}}}
         
+        # --- AI Prompt Enhancement ---
+        # Map the slider value to a descriptive term for the AI.
+        detail_map = {0: "brief", 1: "of medium detail", 2: "verbose and highly detailed"}
+        detail_text = detail_map.get(detail_level, "of medium detail") # Default to medium
+        
         prompt_parts = [
-            "Analyse the following WhatsApp chat log. Provide a structured summary in JSON format. ",
+            f"Analyse the following WhatsApp chat log. Provide a structured, {detail_text} summary in JSON format. ",
             "The summary should be broken into parts. Most parts should be of type 'text'. ",
             "Identify 1-3 particularly important or representative 'key_message's. Ensure these are from a variety of different authors if possible, not just one person. ",
             "For each part, provide the content and the author. For general summary text, the author can be 'narrator'. ",
+            "Crucially, be specific in your summary. Use the names of the people involved (e.g., 'Simon and Luke discussed...') instead of generic phrases like 'the chat says' or 'the users talked about'. ",
             "Finally, provide a list of key 'bullet_points'.\n\n"
         ]
         
@@ -171,14 +158,12 @@ class ChatSummarizerApp:
     def detect_system_theme(self):
         """Detects if the system (Windows) is in dark mode."""
         saved_theme = self.config.getboolean('Settings', 'dark_mode', fallback=None)
-        if saved_theme is not None:
-            return saved_theme
+        if saved_theme is not None: return saved_theme
         try:
             import winreg
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize')
             return winreg.QueryValueEx(key, 'AppsUseLightTheme')[0] == 0
-        except (ImportError, FileNotFoundError):
-            return False
+        except (ImportError, FileNotFoundError): return False
 
     def setup_styles(self):
         self.style = ttk.Style()
@@ -238,52 +223,64 @@ class ChatSummarizerApp:
         self.root.destroy()
 
     def setup_ui(self):
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        self.main_frame = ttk.Frame(self.root, padding="20")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        controls_frame = ttk.Frame(main_frame)
-        controls_frame.pack(fill=tk.X, pady=(0, 10))
-        controls_frame.columnconfigure(1, weight=1)
+        self.controls_frame = ttk.Frame(self.main_frame)
+        self.controls_frame.pack(fill=tk.X, pady=(0, 10), expand=False)
+        self.controls_frame.columnconfigure(1, weight=1)
 
-        self.file_path_label = ttk.Label(controls_frame, text="Drop .zip file here or click Import", wraplength=400, anchor="center")
+        self.file_path_label = ttk.Label(self.controls_frame, text="Drop .zip file here or click Import", wraplength=400, anchor="center")
         self.file_path_label.grid(row=0, column=1, sticky="ew", padx=(10, 0))
-        self.import_button = ttk.Button(controls_frame, text="Import Chat (.zip)", command=self.select_file)
+        self.import_button = ttk.Button(self.controls_frame, text="Import Chat (.zip)", command=self.select_file)
         self.import_button.grid(row=0, column=0, sticky="w")
 
-        ttk.Label(controls_frame, text="Gemini API Key:").grid(row=1, column=0, sticky="w", pady=(10,0))
-        self.api_key_entry = ttk.Entry(controls_frame, show="*")
+        ttk.Label(self.controls_frame, text="Gemini API Key:").grid(row=1, column=0, sticky="w", pady=(10,0))
+        self.api_key_entry = ttk.Entry(self.controls_frame, show="*")
         self.api_key_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(10,0))
         self.api_key_entry.insert(0, self.config['API']['key'])
         
-        settings_frame = ttk.Frame(controls_frame)
-        settings_frame.grid(row=2, column=1, sticky='w', padx=(10,0), pady=(5,0))
-        
-        self.remember_api_key_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'remember_key', fallback=False))
-        self.remember_checkbox = ttk.Checkbutton(settings_frame, text="Remember API Key", variable=self.remember_api_key_var, command=self.save_api_key)
-        self.remember_checkbox.pack(side=tk.LEFT, padx=(0, 20))
+        # --- Settings Frame (Slider and Checkboxes) ---
+        settings_frame = ttk.Frame(self.controls_frame)
+        settings_frame.grid(row=2, column=1, sticky='ew', padx=(10,0), pady=(5,0))
 
-        self.dark_mode_checkbox = ttk.Checkbutton(settings_frame, text="Toggle Dark Mode", variable=self.dark_mode, command=self.toggle_dark_mode)
+        # Detail Level Slider
+        detail_frame = ttk.Frame(settings_frame)
+        detail_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(detail_frame, text="Brief").pack(side=tk.LEFT, padx=(0,5))
+        self.detail_var = tk.IntVar(value=1)
+        self.detail_slider = ttk.Scale(detail_frame, from_=0, to=2, variable=self.detail_var, orient='horizontal', command=lambda s: self.detail_var.set(round(float(s))))
+        self.detail_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(detail_frame, text="Verbose").pack(side=tk.LEFT, padx=(5,0))
+
+        # Checkboxes Frame
+        checkbox_frame = ttk.Frame(settings_frame)
+        checkbox_frame.pack(side=tk.LEFT, padx=(20,0))
+        self.remember_api_key_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'remember_key', fallback=False))
+        self.remember_checkbox = ttk.Checkbutton(checkbox_frame, text="Remember API Key", variable=self.remember_api_key_var, command=self.save_api_key)
+        self.remember_checkbox.pack(side=tk.LEFT, padx=(0, 20))
+        self.dark_mode_checkbox = ttk.Checkbutton(checkbox_frame, text="Toggle Dark Mode", variable=self.dark_mode, command=self.toggle_dark_mode)
         self.dark_mode_checkbox.pack(side=tk.LEFT)
 
-        ttk.Label(controls_frame, text="Summarise Period:").grid(row=3, column=0, sticky="w", pady=(10,0))
+        ttk.Label(self.controls_frame, text="Summarise Period:").grid(row=3, column=0, sticky="w", pady=(10,0))
         self.time_range_var = tk.StringVar(value="All time")
         time_options = ["Last 24 hours", "Last 7 days", "Last 30 days", "All time"]
-        self.time_range_menu = ttk.OptionMenu(controls_frame, self.time_range_var, time_options[3], *time_options)
+        self.time_range_menu = ttk.OptionMenu(self.controls_frame, self.time_range_var, time_options[3], *time_options)
         self.time_range_menu.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(10,0))
 
         self.include_images_var = tk.BooleanVar(value=True)
-        self.image_checkbox = ttk.Checkbutton(controls_frame, text="Include Image Summaries (Max 15 images)", variable=self.include_images_var)
+        self.image_checkbox = ttk.Checkbutton(self.controls_frame, text="Include Image Summaries (Max 15 images)", variable=self.include_images_var)
         self.image_checkbox.grid(row=4, column=1, sticky="w", padx=(10,0), pady=(10,0))
 
-        self.summarize_button = ttk.Button(main_frame, text="Generate Summary", command=self.start_summary_thread)
-        self.summarize_button.pack(fill=tk.X, pady=10)
-        self.progress_bar = ttk.Progressbar(main_frame, mode='indeterminate')
+        self.summarize_button = ttk.Button(self.main_frame, text="Generate Summary", command=self.start_summary_thread)
+        self.summarize_button.pack(fill=tk.X, pady=10, expand=False)
+        self.progress_bar = ttk.Progressbar(self.main_frame, mode='indeterminate')
         
-        summary_container = ttk.Frame(main_frame)
-        summary_container.pack(side="top", fill="both", expand=True, pady=(0, 10))
+        self.summary_container = ttk.Frame(self.main_frame)
+        self.summary_container.pack(side="top", fill="both", expand=True, pady=(0, 10))
         
-        summary_canvas = tk.Canvas(summary_container, relief="solid", borderwidth=1)
-        summary_scrollbar = ttk.Scrollbar(summary_container, orient="vertical", command=summary_canvas.yview)
+        summary_canvas = tk.Canvas(self.summary_container, relief="solid", borderwidth=1)
+        summary_scrollbar = ttk.Scrollbar(self.summary_container, orient="vertical", command=summary_canvas.yview)
         self.summary_frame = tk.Frame(summary_canvas)
         
         summary_scrollbar.pack(side="right", fill="y")
@@ -293,11 +290,11 @@ class ChatSummarizerApp:
         summary_canvas.configure(yscrollcommand=summary_scrollbar.set)
         self.summary_frame.bind("<Configure>", lambda e: summary_canvas.configure(scrollregion=summary_canvas.bbox("all")))
 
-        image_preview_frame = ttk.Frame(main_frame)
-        image_preview_frame.pack(fill="x", expand=False)
+        self.image_preview_frame = ttk.Frame(self.main_frame)
+        self.image_preview_frame.pack(fill="x", expand=False)
         
-        self.image_canvas = tk.Canvas(image_preview_frame, relief="solid", borderwidth=1, height=120)
-        img_scrollbar = ttk.Scrollbar(image_preview_frame, orient="horizontal", command=self.image_canvas.xview)
+        self.image_canvas = tk.Canvas(self.image_preview_frame, relief="solid", borderwidth=1, height=120)
+        img_scrollbar = ttk.Scrollbar(self.image_preview_frame, orient="horizontal", command=self.image_canvas.xview)
         self.image_frame = ttk.Frame(self.image_canvas, style="ImageFrame.TFrame")
 
         self.image_canvas.create_window((0, 0), window=self.image_frame, anchor="nw")
@@ -308,8 +305,6 @@ class ChatSummarizerApp:
         
         self.image_frame.bind("<Configure>", lambda e: self.image_canvas.configure(scrollregion=self.image_canvas.bbox("all")))
 
-        # --- Status bar ---
-        # *** FIX: Create the StringVar first, then assign it to the widget. ***
         self.status_var = tk.StringVar(value="Ready")
         self.status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=5)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -392,9 +387,10 @@ class ChatSummarizerApp:
             else:
                 chat_text_for_ai = format_chat_for_summary(filtered_messages)
                 api_key = self.api_key_entry.get()
+                detail_level = self.detail_var.get()
                 
                 image_filenames_to_send = [msg['image_filename'] for msg in reversed(filtered_messages) if msg['image_filename']][:15] if self.include_images_var.get() else []
-                summary_data = get_summary_from_gemini(api_key, chat_text_for_ai, self.chat_file_path, image_filenames_to_send)
+                summary_data = get_summary_from_gemini(api_key, chat_text_for_ai, detail_level, self.chat_file_path, image_filenames_to_send)
                 
                 if summary_data and 'error' not in summary_data:
                     top_yapper, top_photographer = analyse_chat_participants(filtered_messages)
@@ -449,6 +445,20 @@ class ChatSummarizerApp:
         tk.Label(table_frame, text=data.get('top_photographer', 'N/A'), font=('Helvetica', 10), bg=colors['summary_bg'], fg=colors['fg']).grid(row=1, column=1, sticky='w')
         
         self.status_var.set("Summary generated successfully.")
+        
+        # --- Dynamic Window Resizing Logic ---
+        self.root.update_idletasks()
+        controls_height = self.controls_frame.winfo_reqheight()
+        button_height = self.summarize_button.winfo_reqheight()
+        summary_height = self.summary_frame.winfo_reqheight()
+        image_preview_height = self.image_preview_frame.winfo_reqheight()
+        status_bar_height = self.status_bar.winfo_reqheight()
+        
+        total_content_height = controls_height + button_height + summary_height + image_preview_height + status_bar_height + 80
+        max_height = self.root.winfo_screenheight()
+        new_height = min(max(900, total_content_height), int(max_height * 0.95))
+        
+        self.root.geometry(f"800x{new_height}")
 
     def finalize_summary_ui(self):
         self.progress_bar.stop()
