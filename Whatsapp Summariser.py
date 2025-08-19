@@ -16,6 +16,8 @@ import json # To handle the structured JSON response from the API
 import tempfile # To temporarily store images for viewing
 import subprocess # To open files with the default system application
 import sys # To check the operating system
+import cv2 # OpenCV for video processing
+import numpy as np # Required by OpenCV
 
 # --- Core Functions ---
 
@@ -29,8 +31,8 @@ def get_mime_type(filename):
 
 def parse_whatsapp_zip(zip_path):
     """Parses an exported WhatsApp .zip chat archive."""
-    messages, image_list = [], []
-    image_extensions = ('.jpg', '.jpeg', '.png', '.webp')
+    messages, image_list, video_list = [], [], []
+    media_extensions = ('.jpg', '.jpeg', '.png', '.webp', '.mp4')
     pattern = re.compile(r"^(\d{1,2}/\d{1,2}/\d{4}, \d{2}:\d{2}) - (.*?): (.*?)(?:\s*\(file attached\))?$")
 
     try:
@@ -38,7 +40,9 @@ def parse_whatsapp_zip(zip_path):
             chat_filename = next((name for name in zf.namelist() if name.endswith('.txt')), None)
             if not chat_filename: raise FileNotFoundError("Could not find a .txt chat file in the zip archive.")
             
-            image_list = [name for name in zf.namelist() if name.lower().endswith(image_extensions)]
+            all_media_files = [name for name in zf.namelist() if name.lower().endswith(media_extensions)]
+            image_list = [name for name in all_media_files if not name.lower().endswith('.mp4')]
+            video_list = [name for name in all_media_files if name.lower().endswith('.mp4')]
 
             with zf.open(chat_filename) as chat_file:
                 chat_content = io.TextIOWrapper(chat_file, encoding='utf-8')
@@ -47,15 +51,16 @@ def parse_whatsapp_zip(zip_path):
                     if match:
                         datetime_str, author, message_text = match.groups()
                         image_filename = message_text if message_text in image_list else None
+                        video_filename = message_text if message_text in video_list else None
                         try:
                             dt_obj = datetime.strptime(datetime_str, '%d/%m/%Y, %H:%M')
-                            messages.append({'timestamp': dt_obj, 'author': author.strip(), 'message': message_text.strip(), 'image_filename': image_filename})
+                            messages.append({'timestamp': dt_obj, 'author': author.strip(), 'message': message_text.strip(), 'image_filename': image_filename, 'video_filename': video_filename})
                         except ValueError: continue
     except Exception as e:
         messagebox.showerror("Parsing Error", f"Failed to parse zip file: {e}")
-        return [], []
+        return [], [], []
         
-    return messages, image_list
+    return messages, image_list, video_list
 
 def filter_messages_by_time(messages, time_range_str):
     """Filters messages based on the selected time range."""
@@ -70,9 +75,43 @@ def filter_messages_by_time(messages, time_range_str):
 
 def format_chat_for_summary(messages):
     """Formats a list of message dictionaries into a single string for the AI."""
-    return "\n".join([f"[{msg['timestamp'].strftime('%Y-%m-%d %H:%M')}] {msg['author']}: {'[Image Sent]' if msg['image_filename'] else msg['message']}" for msg in messages])
+    formatted_lines = []
+    for msg in messages:
+        if msg['image_filename']: text = f"[Image Sent: {msg['image_filename']}]"
+        elif msg['video_filename']: text = f"[Video Sent: {msg['video_filename']}]"
+        else: text = msg['message']
+        formatted_lines.append(f"[{msg['timestamp'].strftime('%Y-%m-%d %H:%M')}] {msg['author']}: {text}")
+    return "\n".join(formatted_lines)
 
-def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, image_filenames=None):
+def extract_frame_from_video(zip_path, video_filename, temp_dir, as_thumbnail=False):
+    """Extracts a frame from a video file inside a zip archive at the 10% mark."""
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            video_path = zf.extract(video_filename, path=temp_dir)
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened(): return None
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            frame_no = int(total_frames * 0.1)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+            success, frame = cap.read()
+            cap.release()
+            
+            if success:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(frame_rgb)
+                
+                if as_thumbnail:
+                    pil_img.thumbnail((100, 100))
+                    return pil_img
+
+                buf = io.BytesIO()
+                pil_img.save(buf, format="JPEG")
+                return base64.b64encode(buf.getvalue()).decode('utf-8')
+            return None
+    except Exception:
+        return None
+
+def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, image_filenames=None, video_filenames=None, temp_dir=None):
     """Uses the Gemini API to get a structured summary of the chat."""
     if not api_key: raise ValueError("API key is missing.")
     if not chat_text: return None
@@ -81,12 +120,34 @@ def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, ima
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        json_schema = {"type": "object", "properties": {"summary_parts": {"type": "array", "items": {"type": "object", "properties": {"type": {"type": "string", "enum": ["text", "key_message"]}, "content": {"type": "string"}, "author": {"type": "string"}}, "required": ["type", "content"]}}, "bullet_points": {"type": "array", "items": {"type": "string"}}}}
+        # UPDATED SCHEMA: Added 'media' type and 'filename' property
+        json_schema = {
+            "type": "object",
+            "properties": {
+                "summary_parts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["text", "key_message", "media"]},
+                            "content": {"type": "string"},
+                            "author": {"type": "string"},
+                            "filename": {"type": "string"}
+                        },
+                        "required": ["type"]
+                    }
+                },
+                "bullet_points": {"type": "array", "items": {"type": "string"}}
+            }
+        }
         
-        # --- AI Prompt Enhancement ---
-        # Map the slider value to a descriptive term for the AI.
-        detail_map = {0: "brief", 1: "of medium detail", 2: "verbose and highly detailed"}
-        detail_text = detail_map.get(detail_level, "of medium detail") # Default to medium
+        # UPDATED DETAIL MAP: Made brief more brief and verbose more verbose
+        detail_map = {
+            0: "a single sentence summary, capturing only the absolute main topic",
+            1: "a standard, medium-detail summary",
+            2: "an extremely verbose and comprehensive, almost minute-by-minute summary. Capture as many details, nuances, specific examples, jokes, and conversational turns as possible. Be exhaustive"
+        }
+        detail_text = detail_map.get(detail_level, "a standard, medium-detail summary")
         
         prompt_parts = [
             f"Analyse the following WhatsApp chat log. Provide a structured, {detail_text} summary in JSON format. ",
@@ -94,22 +155,36 @@ def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, ima
             "Identify 1-3 particularly important or representative 'key_message's. Ensure these are from a variety of different authors if possible, not just one person. ",
             "For each part, provide the content and the author. For general summary text, the author can be 'narrator'. ",
             "Crucially, be specific in your summary. Use the names of the people involved (e.g., 'Simon and Luke discussed...') instead of generic phrases like 'the chat says' or 'the users talked about'. ",
+            # UPDATED PROMPT: Added instruction for inline media
+            "If you discuss a specific image or video, instead of describing it in a 'text' part, create a 'media' part and set its 'filename' property to the corresponding filename provided with the media. Then continue the summary in a new 'text' part.",
             "Finally, provide a list of key 'bullet_points'.\n\n"
         ]
         
         prompt_parts.extend(["--- CHAT LOG ---\n", chat_text, "\n--- END CHAT LOG ---\n"])
         
+        # UPDATED PROMPT: Added context for media files
+        if (zip_path and image_filenames) or (zip_path and video_filenames):
+             prompt_parts.append("\n--- MEDIA FOR CONTEXT ---\n")
+
         if zip_path and image_filenames:
-            prompt_parts.append("\n--- IMAGES ---\n")
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 for filename in image_filenames:
                     mime_type = get_mime_type(filename)
                     if mime_type:
                         with zf.open(filename) as image_file:
-                            image_bytes = image_file.read()
-                            encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+                            encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
+                            # Add filename before the data for the AI to associate them
+                            prompt_parts.append(f"FILENAME: {filename}")
                             prompt_parts.append({"inline_data": {"mime_type": mime_type, "data": encoded_image}})
         
+        if zip_path and video_filenames and temp_dir:
+            for filename in video_filenames:
+                encoded_frame = extract_frame_from_video(zip_path, filename, temp_dir)
+                if encoded_frame:
+                    # Add filename before the data for the AI to associate them
+                    prompt_parts.append(f"FILENAME: {filename}")
+                    prompt_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": encoded_frame}})
+
         response = model.generate_content(prompt_parts, generation_config=genai.types.GenerationConfig(response_mime_type="application/json", response_schema=json_schema))
         return json.loads(response.text)
     except Exception as e:
@@ -124,8 +199,12 @@ def analyse_chat_participants(messages):
     message_counts, image_counts = {}, {}
     for msg in messages:
         author = msg['author']
-        message_counts[author] = message_counts.get(author, 0) + 1
-        if msg['image_filename']: image_counts[author] = image_counts.get(author, 0) + 1
+        # Increment message count for the author (excluding media messages for 'yapper' award)
+        if not msg['image_filename'] and not msg['video_filename']:
+            message_counts[author] = message_counts.get(author, 0) + 1
+        # Increment media count if an image or video was sent
+        if msg['image_filename'] or msg['video_filename']:
+            image_counts[author] = image_counts.get(author, 0) + 1
     top_yapper = max(message_counts, key=message_counts.get) if message_counts else "N/A"
     top_photographer = max(image_counts, key=image_counts.get) if image_counts else "N/A"
     return top_yapper, top_photographer
@@ -154,6 +233,13 @@ class ChatSummarizerApp:
         self.setup_styles()
         self.setup_ui()
         self.apply_theme()
+        
+        self.cooldown_seconds = 10
+        
+        # Lists to hold references to images to prevent garbage collection
+        self.thumbnail_photo_images = []
+        self.summary_photo_images = []
+
 
     def detect_system_theme(self):
         """Detects if the system (Windows) is in dark mode."""
@@ -181,7 +267,7 @@ class ChatSummarizerApp:
         self.style.configure(".", background=colors['bg'], foreground=colors['fg'])
         self.style.configure("TFrame", background=colors['bg'])
         self.style.configure("TLabel", background=colors['bg'], foreground=colors['fg'])
-        self.style.configure("TButton", padding=6, relief="flat", background=colors['btn_bg'], foreground=colors['btn_fg'])
+        self.style.configure("TButton", padding=6, relief="flat", background=colors['btn_bg'], foreground=colors['fg'])
         self.style.map("TButton", background=[('active', colors['btn_active'])])
         self.style.configure("TEntry", fieldbackground=colors['entry_bg'], foreground=colors['fg'], insertcolor=colors['fg'])
         self.style.configure("TProgressbar", background=colors['btn_bg'], troughcolor=colors['bg'])
@@ -189,6 +275,13 @@ class ChatSummarizerApp:
         self.style.map('TCheckbutton', indicatorcolor=[('selected', colors['btn_bg'])])
         self.style.configure("ImageFrame.TFrame", background=colors['entry_bg'])
         
+        self.style.configure("Horizontal.TScale", background=colors['bg'])
+        self.style.map('Horizontal.TScale', background=[('active', colors['bg'])], troughcolor=[('!disabled', colors['entry_bg'])])
+        
+        self.slider_thumb_img = self.create_slider_thumb(colors['btn_bg'])
+        self.style.element_create('custom.Scale.slider', 'image', self.slider_thumb_img, border=8, sticky='nswe')
+        self.style.layout('Horizontal.TScale', [('Horizontal.Scale.trough', {'sticky': 'nswe'}), ('custom.Scale.slider', {'side': 'left', 'sticky': ''})])
+
         self.summary_frame.config(bg=colors['summary_bg'])
         self.image_canvas.config(bg=colors['entry_bg'])
         
@@ -200,6 +293,14 @@ class ChatSummarizerApp:
         
         for child in self.image_frame.winfo_children():
             if isinstance(child, tk.Label): child.config(bg=colors['entry_bg'])
+
+    def create_slider_thumb(self, color):
+        """Creates an image for the slider thumb."""
+        image = Image.new('RGBA', (16, 16), (0,0,0,0))
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((0, 0, 15, 15), fill=color)
+        return ImageTk.PhotoImage(image)
 
     def toggle_dark_mode(self):
         self.apply_theme()
@@ -240,11 +341,9 @@ class ChatSummarizerApp:
         self.api_key_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(10,0))
         self.api_key_entry.insert(0, self.config['API']['key'])
         
-        # --- Settings Frame (Slider and Checkboxes) ---
         settings_frame = ttk.Frame(self.controls_frame)
         settings_frame.grid(row=2, column=1, sticky='ew', padx=(10,0), pady=(5,0))
 
-        # Detail Level Slider
         detail_frame = ttk.Frame(settings_frame)
         detail_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(detail_frame, text="Brief").pack(side=tk.LEFT, padx=(0,5))
@@ -253,24 +352,22 @@ class ChatSummarizerApp:
         self.detail_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(detail_frame, text="Verbose").pack(side=tk.LEFT, padx=(5,0))
 
-        # Checkboxes Frame
         checkbox_frame = ttk.Frame(settings_frame)
         checkbox_frame.pack(side=tk.LEFT, padx=(20,0))
         self.remember_api_key_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'remember_key', fallback=False))
         self.remember_checkbox = ttk.Checkbutton(checkbox_frame, text="Remember API Key", variable=self.remember_api_key_var, command=self.save_api_key)
-        self.remember_checkbox.pack(side=tk.LEFT, padx=(0, 20))
-        self.dark_mode_checkbox = ttk.Checkbutton(checkbox_frame, text="Toggle Dark Mode", variable=self.dark_mode, command=self.toggle_dark_mode)
-        self.dark_mode_checkbox.pack(side=tk.LEFT)
+        self.remember_checkbox.pack(side=tk.LEFT, padx=(0, 10))
+        self.dark_mode_checkbox = ttk.Checkbutton(checkbox_frame, text="Dark Mode", variable=self.dark_mode, command=self.toggle_dark_mode)
+        self.dark_mode_checkbox.pack(side=tk.LEFT, padx=(0,10))
+        self.include_images_var = tk.BooleanVar(value=True)
+        self.image_checkbox = ttk.Checkbutton(checkbox_frame, text="Include Media", variable=self.include_images_var)
+        self.image_checkbox.pack(side=tk.LEFT)
 
         ttk.Label(self.controls_frame, text="Summarise Period:").grid(row=3, column=0, sticky="w", pady=(10,0))
         self.time_range_var = tk.StringVar(value="All time")
         time_options = ["Last 24 hours", "Last 7 days", "Last 30 days", "All time"]
         self.time_range_menu = ttk.OptionMenu(self.controls_frame, self.time_range_var, time_options[3], *time_options)
         self.time_range_menu.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(10,0))
-
-        self.include_images_var = tk.BooleanVar(value=True)
-        self.image_checkbox = ttk.Checkbutton(self.controls_frame, text="Include Image Summaries (Max 15 images)", variable=self.include_images_var)
-        self.image_checkbox.grid(row=4, column=1, sticky="w", padx=(10,0), pady=(10,0))
 
         self.summarize_button = ttk.Button(self.main_frame, text="Generate Summary", command=self.start_summary_thread)
         self.summarize_button.pack(fill=tk.X, pady=10, expand=False)
@@ -309,7 +406,7 @@ class ChatSummarizerApp:
         self.status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=5)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        self.chat_file_path, self.all_messages, self.image_list, self.photo_images = None, [], [], []
+        self.chat_file_path, self.all_messages, self.image_list, self.video_list = None, [], [], []
 
     def handle_drop(self, event):
         filepath = event.data.strip('{}')
@@ -325,40 +422,52 @@ class ChatSummarizerApp:
         self.file_path_label.config(text=os.path.basename(path))
         self.status_var.set("File selected. Parsing messages...")
         self.root.update_idletasks()
-        self.all_messages, self.image_list = parse_whatsapp_zip(self.chat_file_path)
+        self.all_messages, self.image_list, self.video_list = parse_whatsapp_zip(self.chat_file_path)
         
         if not self.all_messages:
              messagebox.showwarning("Parsing Issue", "No messages could be parsed.")
              self.status_var.set("Parsing failed.")
         else:
             self.status_var.set(f"Successfully parsed {len(self.all_messages)} messages.")
-            self.display_image_thumbnails()
+            self.display_media_thumbnails()
 
-    def open_image_external(self, img_name):
+    def open_media_external(self, media_name):
         if not self.chat_file_path: return
         try:
             with zipfile.ZipFile(self.chat_file_path, 'r') as zf:
-                extracted_path = zf.extract(img_name, path=self.temp_dir)
+                extracted_path = zf.extract(media_name, path=self.temp_dir)
                 if sys.platform == "win32": os.startfile(extracted_path)
                 else: subprocess.call(["open" if sys.platform == "darwin" else "xdg-open", extracted_path])
         except Exception as e:
-            messagebox.showerror("Error", f"Could not open image: {e}")
+            messagebox.showerror("Error", f"Could not open media: {e}")
 
-    def display_image_thumbnails(self):
+    def display_media_thumbnails(self):
         for widget in self.image_frame.winfo_children(): widget.destroy()
-        self.photo_images.clear()
-        if not self.chat_file_path or not self.image_list: return
+        self.thumbnail_photo_images.clear()
+        if not self.chat_file_path: return
+
         try:
             with zipfile.ZipFile(self.chat_file_path, 'r') as zf:
+                # Display image thumbnails
                 for img_name in self.image_list:
                     with zf.open(img_name) as image_file:
                         img = Image.open(io.BytesIO(image_file.read()))
                         img.thumbnail((100, 100))
                         photo_img = ImageTk.PhotoImage(img)
-                        self.photo_images.append(photo_img)
+                        self.thumbnail_photo_images.append(photo_img)
                         img_label = tk.Label(self.image_frame, image=photo_img, bg=self.colors['dark' if self.dark_mode.get() else 'light']['entry_bg'], cursor="hand2")
                         img_label.pack(side=tk.LEFT, padx=5, pady=5)
-                        img_label.bind("<Button-1>", lambda e, name=img_name: self.open_image_external(name))
+                        img_label.bind("<Button-1>", lambda e, name=img_name: self.open_media_external(name))
+                # Display video thumbnails
+                for vid_name in self.video_list:
+                    thumb_img = extract_frame_from_video(self.chat_file_path, vid_name, self.temp_dir, as_thumbnail=True)
+                    if thumb_img:
+                        photo_img = ImageTk.PhotoImage(thumb_img)
+                        self.thumbnail_photo_images.append(photo_img)
+                        vid_label = tk.Label(self.image_frame, image=photo_img, bg=self.colors['dark' if self.dark_mode.get() else 'light']['entry_bg'], cursor="hand2")
+                        vid_label.pack(side=tk.LEFT, padx=5, pady=5)
+                        vid_label.bind("<Button-1>", lambda e, name=vid_name: self.open_media_external(name))
+
         except Exception as e:
             self.status_var.set(f"Error loading thumbnails: {e}")
 
@@ -389,8 +498,13 @@ class ChatSummarizerApp:
                 api_key = self.api_key_entry.get()
                 detail_level = self.detail_var.get()
                 
-                image_filenames_to_send = [msg['image_filename'] for msg in reversed(filtered_messages) if msg['image_filename']][:15] if self.include_images_var.get() else []
-                summary_data = get_summary_from_gemini(api_key, chat_text_for_ai, detail_level, self.chat_file_path, image_filenames_to_send)
+                image_filenames_to_send, video_filenames_to_send = [], []
+                if self.include_images_var.get():
+                    # Get the most recent 15 images/videos
+                    image_filenames_to_send = [msg['image_filename'] for msg in reversed(filtered_messages) if msg['image_filename']][:15]
+                    video_filenames_to_send = [msg['video_filename'] for msg in reversed(filtered_messages) if msg['video_filename']][:15]
+                
+                summary_data = get_summary_from_gemini(api_key, chat_text_for_ai, detail_level, self.chat_file_path, image_filenames_to_send, video_filenames_to_send, self.temp_dir)
                 
                 if summary_data and 'error' not in summary_data:
                     top_yapper, top_photographer = analyse_chat_participants(filtered_messages)
@@ -404,8 +518,31 @@ class ChatSummarizerApp:
             self.root.after(0, self.display_structured_summary, summary_data)
             self.root.after(0, self.finalize_summary_ui)
 
+    def load_media_for_summary(self, filename):
+        """Loads an image or video frame from the zip for inline display."""
+        if not self.chat_file_path: return None
+        try:
+            with zipfile.ZipFile(self.chat_file_path, 'r') as zf:
+                if filename in self.image_list:
+                    with zf.open(filename) as image_file:
+                        img = Image.open(io.BytesIO(image_file.read()))
+                        img.thumbnail((500, 500)) # Resize for summary view
+                        return ImageTk.PhotoImage(img)
+                elif filename in self.video_list:
+                    pil_img = extract_frame_from_video(self.chat_file_path, filename, self.temp_dir, as_thumbnail=False)
+                    if pil_img:
+                        # The function returns a b64 string, need to decode it back to an image
+                        img_data = base64.b64decode(pil_img)
+                        img = Image.open(io.BytesIO(img_data))
+                        img.thumbnail((500, 500)) # Resize for summary view
+                        return ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+        return None
+
     def display_structured_summary(self, data):
         for widget in self.summary_frame.winfo_children(): widget.destroy()
+        self.summary_photo_images.clear() # Clear previous summary images
         theme = 'dark' if self.dark_mode.get() else 'light'
         colors = self.colors[theme]
 
@@ -417,16 +554,29 @@ class ChatSummarizerApp:
             return
 
         for part in data.get('summary_parts', []):
-            author = part.get('author', 'System')
-            content = part.get('content', '')
-            if part.get('type') == 'key_message':
-                key_msg_frame = tk.Frame(self.summary_frame, bg=colors['key_msg_bg'])
+            part_type = part.get('type')
+            
+            if part_type == 'key_message':
+                author = part.get('author', 'System')
+                content = part.get('content', '')
+                key_msg_frame = tk.Frame(self.summary_frame, bg=colors['key_msg_bg'], relief="solid", borderwidth=1)
                 key_msg_frame.pack(pady=10, padx=10, fill='x')
                 author_label = tk.Label(key_msg_frame, text=f"{author} said:", wraplength=700, justify="left", bg=colors['key_msg_bg'], fg=colors['fg'], font=('Helvetica', 9, 'italic'))
                 author_label.pack(pady=(5, 0), padx=10, anchor='w')
                 content_label = tk.Label(key_msg_frame, text=content, wraplength=680, justify="left", bg=colors['key_msg_bg'], fg=colors['fg'], font=('Helvetica', 12, 'bold'))
                 content_label.pack(pady=(0, 5), padx=10, anchor='w')
-            else:
+            
+            elif part_type == 'media':
+                filename = part.get('filename')
+                if filename:
+                    media_photo = self.load_media_for_summary(filename)
+                    if media_photo:
+                        self.summary_photo_images.append(media_photo)
+                        img_label = tk.Label(self.summary_frame, image=media_photo, bg=colors['summary_bg'])
+                        img_label.pack(pady=10, padx=10)
+
+            else: # Default to 'text'
+                content = part.get('content', '')
                 content_label = tk.Label(self.summary_frame, text=content, wraplength=700, justify="left", bg=colors['summary_bg'], fg=colors['fg'], font=('Helvetica', 10))
                 content_label.pack(pady=5, padx=10, anchor='w')
 
@@ -446,7 +596,6 @@ class ChatSummarizerApp:
         
         self.status_var.set("Summary generated successfully.")
         
-        # --- Dynamic Window Resizing Logic ---
         self.root.update_idletasks()
         controls_height = self.controls_frame.winfo_reqheight()
         button_height = self.summarize_button.winfo_reqheight()
@@ -463,11 +612,25 @@ class ChatSummarizerApp:
     def finalize_summary_ui(self):
         self.progress_bar.stop()
         self.progress_bar.pack_forget()
-        self.summarize_button.config(state=tk.NORMAL)
+        self.start_cooldown()
+
+    def start_cooldown(self):
+        """Starts the cooldown timer on the summarize button."""
+        self.summarize_button.config(state=tk.DISABLED)
+        self.update_cooldown(self.cooldown_seconds)
+
+    def update_cooldown(self, seconds_left):
+        """Updates the button text with the countdown."""
+        if seconds_left > 0:
+            self.summarize_button.config(text=f"Please wait ({seconds_left}s)")
+            self.root.after(1000, self.update_cooldown, seconds_left - 1)
+        else:
+            self.summarize_button.config(text="Generate Summary", state=tk.NORMAL)
+
 
 if __name__ == "__main__":
     # To run this code, you need to install:
-    # pip install google-generativeai tkinterdnd2 pillow
+    # pip install google-generativeai tkinterdnd2 pillow opencv-python
     
     root = TkinterDnD.Tk()
     app = ChatSummarizerApp(root)
