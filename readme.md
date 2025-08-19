@@ -13,12 +13,12 @@ A desktop application that uses the Google Gemini API to analyse and create stru
 * [Features](https://www.google.com/search?q=%23features "null")
 * [Setup and Installation](https://www.google.com/search?q=%23setup-and-installation "null")
   * [Step 1: Install Python](https://www.google.com/search?q=%23step-1-install-python "null")
-  * [Step 2: Download the Summariser](https://www.google.com/search?q=%23step-2-download-the-summariser "null")
-  * [Step 3: Install Dependencies](https://www.google.com/search?q=%23step-3-install-dependencies "null")
+  * [Step 2: Get Your Gemini API Key](https://www.google.com/search?q=%23step-2-get-your-gemini-api-key "null")
+  * [Step 3: Download the Summariser](https://www.google.com/search?q=%23step-3-download-the-summariser "null")
+  * [Step 4: Install Dependencies](https://www.google.com/search?q=%23step-4-install-dependencies "null")
 * [How to Use](https://www.google.com/search?q=%23how-to-use "null")
   * [Step 1: Export Your WhatsApp Chat](https://www.google.com/search?q=%23step-1-export-your-whatsapp-chat "null")
-  * [Step 2: Get Your Gemini API Key](https://www.google.com/search?q=%23step-2-get-your-gemini-api-key "null")
-  * [Step 3: Run the Application](https://www.google.com/search?q=%23step-3-run-the-application "null")
+  * [Step 2: Run the Application](https://www.google.com/search?q=%23step-2-run-the-application "null")
 * [Using the App Interface](https://www.google.com/search?q=%23using-the-app-interface "null")
 * [Privacy, Security, and Data Handling](https://www.google.com/search?q=%23privacy-security-and-data-handling "null")
 
@@ -54,11 +54,24 @@ Download the latest version from the official Python website.
 2. Download the installer for your operating system.
 3. Run the installer, ensuring you follow the on-screen instructions. On macOS, make sure to run the `Install Certificates.command` file that comes with the installation.
 
-### Step 2: Download the Summariser
+### Step 2:** Get Your Gemini API Key**
+
+**This application requires a Google Gemini API key to function. You can get one for free from Google AI Studio.**
+
+**Watch the video below for a step-by-step guide:**
+
+**Written Instructions:**
+
+1. **Visit **[Google AI Studio](https://aistudio.google.com/ "null").
+2. **Sign in with your Google account.**
+3. **Click on ****"Get API key"** and then  **"Create API key in new project"** **.**
+4. **Copy the generated key. You will need to paste this into the application later.**
+
+### Step 3: Download the Summariser
 
 Download the `Whatsapp Summariser.py` file from this repository and place it in a dedicated folder on your computer.
 
-### Step 3: Install Dependencies
+### Step** 4:** Install Dependencies
 
 Open a terminal (on macOS/Linux) or Command Prompt (on Windows), navigate to the folder where you saved the script, and run the following command to install the necessary Python libraries:
 
@@ -89,20 +102,7 @@ You need to export the chat you want to analyse from your phone. **It is essenti
 4. Choose `Include Media`.
 5. Save or send the resulting `.zip` file to your computer.
 
-### Step 2: Get Your Gemini API Key
-
-This application requires a Google Gemini API key to function. You can get one for free from Google AI Studio.
-
-**Watch the video below for a step-by-step guide:**
-
-**Written Instructions:**
-
-1. Visit [Google AI Studio](https://aistudio.google.com/ "null").
-2. Sign in with your Google account.
-3. Click on **"Get API key"** and then  **"Create API key in new project"** .
-4. Copy the generated key. You will need to paste this into the application.
-
-### Step 3: Run the Application
+### Step 2: Run the Application
 
 Once the dependencies are installed, you can run the script. In your terminal or command prompt, make sure you are in the correct folder and run:
 
