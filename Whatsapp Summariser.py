@@ -120,7 +120,6 @@ def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, ima
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # UPDATED SCHEMA: Added 'media' type and 'filename' property
         json_schema = {
             "type": "object",
             "properties": {
@@ -141,28 +140,41 @@ def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, ima
             }
         }
         
-        # UPDATED DETAIL MAP: Made brief more brief and verbose more verbose
+        # UPDATED DETAIL MAP: Added word count constraints
         detail_map = {
-            0: "a single sentence summary, capturing only the absolute main topic",
-            1: "a standard, medium-detail summary",
-            2: "an extremely verbose and comprehensive, almost minute-by-minute summary. Capture as many details, nuances, specific examples, jokes, and conversational turns as possible. Be exhaustive"
+            0: {
+                "description": "an extremely brief summary, keeping the total text under 125 words",
+                "quotes": "one single, impactful 'key_message'",
+                "media": "one single 'media' part if media is available"
+            },
+            1: {
+                "description": "a standard, medium-detail summary, keeping the total text under 125 words",
+                "quotes": "2-3 'key_message' parts",
+                "media": "2-3 'media' parts if media is available"
+            },
+            2: {
+                "description": "an extremely verbose and comprehensive summary, keeping the total text under 500 words",
+                "quotes": "at least 4-5 'key_message' parts",
+                "media": "at least 4-5 'media' parts if media is available"
+            }
         }
-        detail_text = detail_map.get(detail_level, "a standard, medium-detail summary")
+        detail_config = detail_map.get(detail_level, detail_map[1]) # Default to medium
+        detail_text = detail_config["description"]
+        quotes_text = detail_config["quotes"]
+        media_text = detail_config["media"]
         
         prompt_parts = [
             f"Analyse the following WhatsApp chat log. Provide a structured, {detail_text} summary in JSON format. ",
             "The summary should be broken into parts. Most parts should be of type 'text'. ",
-            "Identify 1-3 particularly important or representative 'key_message's. Ensure these are from a variety of different authors if possible, not just one person. ",
+            f"Crucially, you must identify {quotes_text}. Ensure these are from a variety of different authors if possible, not just one person. ",
             "For each part, provide the content and the author. For general summary text, the author can be 'narrator'. ",
-            "Crucially, be specific in your summary. Use the names of the people involved (e.g., 'Simon and Luke discussed...') instead of generic phrases like 'the chat says' or 'the users talked about'. ",
-            # UPDATED PROMPT: Added instruction for inline media
-            "If you discuss a specific image or video, instead of describing it in a 'text' part, create a 'media' part and set its 'filename' property to the corresponding filename provided with the media. Then continue the summary in a new 'text' part.",
+            "Use the names of the people involved (e.g., 'Simon and Luke discussed...') instead of generic phrases like 'the chat says' or 'the users talked about'. ",
+            f"If you discuss a specific image or video, create a 'media' part and set its 'filename' property. You should aim to include {media_text}. Then continue the summary in a new 'text' part.",
             "Finally, provide a list of key 'bullet_points'.\n\n"
         ]
         
         prompt_parts.extend(["--- CHAT LOG ---\n", chat_text, "\n--- END CHAT LOG ---\n"])
         
-        # UPDATED PROMPT: Added context for media files
         if (zip_path and image_filenames) or (zip_path and video_filenames):
              prompt_parts.append("\n--- MEDIA FOR CONTEXT ---\n")
 
@@ -173,7 +185,6 @@ def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, ima
                     if mime_type:
                         with zf.open(filename) as image_file:
                             encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
-                            # Add filename before the data for the AI to associate them
                             prompt_parts.append(f"FILENAME: {filename}")
                             prompt_parts.append({"inline_data": {"mime_type": mime_type, "data": encoded_image}})
         
@@ -181,7 +192,6 @@ def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, ima
             for filename in video_filenames:
                 encoded_frame = extract_frame_from_video(zip_path, filename, temp_dir)
                 if encoded_frame:
-                    # Add filename before the data for the AI to associate them
                     prompt_parts.append(f"FILENAME: {filename}")
                     prompt_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": encoded_frame}})
 
@@ -199,10 +209,8 @@ def analyse_chat_participants(messages):
     message_counts, image_counts = {}, {}
     for msg in messages:
         author = msg['author']
-        # Increment message count for the author (excluding media messages for 'yapper' award)
         if not msg['image_filename'] and not msg['video_filename']:
             message_counts[author] = message_counts.get(author, 0) + 1
-        # Increment media count if an image or video was sent
         if msg['image_filename'] or msg['video_filename']:
             image_counts[author] = image_counts.get(author, 0) + 1
     top_yapper = max(message_counts, key=message_counts.get) if message_counts else "N/A"
@@ -236,7 +244,6 @@ class ChatSummarizerApp:
         
         self.cooldown_seconds = 10
         
-        # Lists to hold references to images to prevent garbage collection
         self.thumbnail_photo_images = []
         self.summary_photo_images = []
 
@@ -360,14 +367,24 @@ class ChatSummarizerApp:
         self.dark_mode_checkbox = ttk.Checkbutton(checkbox_frame, text="Dark Mode", variable=self.dark_mode, command=self.toggle_dark_mode)
         self.dark_mode_checkbox.pack(side=tk.LEFT, padx=(0,10))
         self.include_images_var = tk.BooleanVar(value=True)
-        self.image_checkbox = ttk.Checkbutton(checkbox_frame, text="Include Media", variable=self.include_images_var)
+        self.image_checkbox = ttk.Checkbutton(checkbox_frame, text="Include Media", variable=self.include_images_var, command=self.toggle_media_count_menu)
         self.image_checkbox.pack(side=tk.LEFT)
 
-        ttk.Label(self.controls_frame, text="Summarise Period:").grid(row=3, column=0, sticky="w", pady=(10,0))
+        options_frame = ttk.Frame(self.controls_frame)
+        options_frame.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(10,0))
+        options_frame.columnconfigure(1, weight=1)
+        options_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(options_frame, text="Summarise Period:").grid(row=0, column=0, sticky="w")
         self.time_range_var = tk.StringVar(value="All time")
         time_options = ["Last 24 hours", "Last 7 days", "Last 30 days", "All time"]
-        self.time_range_menu = ttk.OptionMenu(self.controls_frame, self.time_range_var, time_options[3], *time_options)
-        self.time_range_menu.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(10,0))
+        self.time_range_menu = ttk.OptionMenu(options_frame, self.time_range_var, time_options[3], *time_options)
+        self.time_range_menu.grid(row=0, column=1, sticky="ew", padx=(10, 20))
+
+        ttk.Label(options_frame, text="Recent Media:").grid(row=0, column=2, sticky="w")
+        self.media_count_var = tk.StringVar(value="0")
+        self.media_count_menu = ttk.OptionMenu(options_frame, self.media_count_var, "0")
+        self.media_count_menu.grid(row=0, column=3, sticky="ew", padx=(10, 0))
 
         self.summarize_button = ttk.Button(self.main_frame, text="Generate Summary", command=self.start_summary_thread)
         self.summarize_button.pack(fill=tk.X, pady=10, expand=False)
@@ -407,6 +424,33 @@ class ChatSummarizerApp:
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
         self.chat_file_path, self.all_messages, self.image_list, self.video_list = None, [], [], []
+        self.toggle_media_count_menu() 
+
+    def toggle_media_count_menu(self):
+        """Enables or disables the media count dropdown based on the checkbox."""
+        total_media = len(self.image_list) + len(self.video_list)
+        if self.include_images_var.get() and total_media > 0:
+            self.media_count_menu.config(state=tk.NORMAL)
+        else:
+            self.media_count_menu.config(state=tk.DISABLED)
+            
+    def update_media_count_menu(self):
+        """Updates the media count dropdown with the available number of media files."""
+        total_media = len(self.image_list) + len(self.video_list)
+        menu = self.media_count_menu["menu"]
+        menu.delete(0, "end")
+
+        if total_media == 0:
+            self.media_count_var.set("0")
+            menu.add_command(label="0", command=tk._setit(self.media_count_var, "0"))
+        else:
+            options = list(range(1, total_media + 1))
+            default_val = str(min(15, total_media)) 
+            self.media_count_var.set(default_val)
+            for option in options:
+                menu.add_command(label=str(option), command=tk._setit(self.media_count_var, str(option)))
+        
+        self.toggle_media_count_menu() 
 
     def handle_drop(self, event):
         filepath = event.data.strip('{}')
@@ -429,6 +473,7 @@ class ChatSummarizerApp:
              self.status_var.set("Parsing failed.")
         else:
             self.status_var.set(f"Successfully parsed {len(self.all_messages)} messages.")
+            self.update_media_count_menu()
             self.display_media_thumbnails()
 
     def open_media_external(self, media_name):
@@ -448,7 +493,6 @@ class ChatSummarizerApp:
 
         try:
             with zipfile.ZipFile(self.chat_file_path, 'r') as zf:
-                # Display image thumbnails
                 for img_name in self.image_list:
                     with zf.open(img_name) as image_file:
                         img = Image.open(io.BytesIO(image_file.read()))
@@ -458,7 +502,6 @@ class ChatSummarizerApp:
                         img_label = tk.Label(self.image_frame, image=photo_img, bg=self.colors['dark' if self.dark_mode.get() else 'light']['entry_bg'], cursor="hand2")
                         img_label.pack(side=tk.LEFT, padx=5, pady=5)
                         img_label.bind("<Button-1>", lambda e, name=img_name: self.open_media_external(name))
-                # Display video thumbnails
                 for vid_name in self.video_list:
                     thumb_img = extract_frame_from_video(self.chat_file_path, vid_name, self.temp_dir, as_thumbnail=True)
                     if thumb_img:
@@ -500,9 +543,15 @@ class ChatSummarizerApp:
                 
                 image_filenames_to_send, video_filenames_to_send = [], []
                 if self.include_images_var.get():
-                    # Get the most recent 15 images/videos
-                    image_filenames_to_send = [msg['image_filename'] for msg in reversed(filtered_messages) if msg['image_filename']][:15]
-                    video_filenames_to_send = [msg['video_filename'] for msg in reversed(filtered_messages) if msg['video_filename']][:15]
+                    try:
+                        num_media_to_include = int(self.media_count_var.get())
+                        media_messages = [msg for msg in filtered_messages if msg['image_filename'] or msg['video_filename']]
+                        most_recent_media_messages = media_messages[-num_media_to_include:]
+                        
+                        image_filenames_to_send = list(set(msg['image_filename'] for msg in most_recent_media_messages if msg['image_filename']))
+                        video_filenames_to_send = list(set(msg['video_filename'] for msg in most_recent_media_messages if msg['video_filename']))
+                    except (ValueError, TypeError):
+                        image_filenames_to_send, video_filenames_to_send = [], []
                 
                 summary_data = get_summary_from_gemini(api_key, chat_text_for_ai, detail_level, self.chat_file_path, image_filenames_to_send, video_filenames_to_send, self.temp_dir)
                 
@@ -526,15 +575,14 @@ class ChatSummarizerApp:
                 if filename in self.image_list:
                     with zf.open(filename) as image_file:
                         img = Image.open(io.BytesIO(image_file.read()))
-                        img.thumbnail((500, 500)) # Resize for summary view
+                        img.thumbnail((500, 500)) 
                         return ImageTk.PhotoImage(img)
                 elif filename in self.video_list:
                     pil_img = extract_frame_from_video(self.chat_file_path, filename, self.temp_dir, as_thumbnail=False)
                     if pil_img:
-                        # The function returns a b64 string, need to decode it back to an image
                         img_data = base64.b64decode(pil_img)
                         img = Image.open(io.BytesIO(img_data))
-                        img.thumbnail((500, 500)) # Resize for summary view
+                        img.thumbnail((500, 500))
                         return ImageTk.PhotoImage(img)
         except Exception:
             return None
@@ -542,7 +590,7 @@ class ChatSummarizerApp:
 
     def display_structured_summary(self, data):
         for widget in self.summary_frame.winfo_children(): widget.destroy()
-        self.summary_photo_images.clear() # Clear previous summary images
+        self.summary_photo_images.clear()
         theme = 'dark' if self.dark_mode.get() else 'light'
         colors = self.colors[theme]
 
@@ -575,7 +623,7 @@ class ChatSummarizerApp:
                         img_label = tk.Label(self.summary_frame, image=media_photo, bg=colors['summary_bg'])
                         img_label.pack(pady=10, padx=10)
 
-            else: # Default to 'text'
+            else:
                 content = part.get('content', '')
                 content_label = tk.Label(self.summary_frame, text=content, wraplength=700, justify="left", bg=colors['summary_bg'], fg=colors['fg'], font=('Helvetica', 10))
                 content_label.pack(pady=5, padx=10, anchor='w')
