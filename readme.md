@@ -54,24 +54,24 @@ Download the latest version from the official Python website.
 2. Download the installer for your operating system.
 3. Run the installer, ensuring you follow the on-screen instructions. On macOS, make sure to run the `Install Certificates.command` file that comes with the installation.
 
-### Step 2:** Get Your Gemini API Key**
+### Step 2: Get Your Gemini API Key
 
-**This application requires a Google Gemini API key to function. You can get one for free from Google AI Studio.**
+This application requires a Google Gemini API key to function. You can get one for free from Google AI Studio.
 
 **Watch the video below for a step-by-step guide:**
 
 **Written Instructions:**
 
-1. **Visit **[Google AI Studio](https://aistudio.google.com/ "null").
-2. **Sign in with your Google account.**
-3. **Click on ****"Get API key"** and then  **"Create API key in new project"** **.**
-4. **Copy the generated key. You will need to paste this into the application later.**
+1. Visit [Google AI Studio](https://aistudio.google.com/ "null").
+2. Sign in with your Google account.
+3. Click on **"Get API key"** and then  **"Create API key in new project"** .
+4. Copy the generated key. You will need to paste this into the application later.
 
 ### Step 3: Download the Summariser
 
 Download the `Whatsapp Summariser.py` file from this repository and place it in a dedicated folder on your computer.
 
-### Step** 4:** Install Dependencies
+### Step 4: Install Dependencies
 
 Open a terminal (on macOS/Linux) or Command Prompt (on Windows), navigate to the folder where you saved the script, and run the following command to install the necessary Python libraries:
 
