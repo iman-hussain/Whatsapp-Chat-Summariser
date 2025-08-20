@@ -213,7 +213,6 @@ class ChatSummarizerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("WhatsApp Chat Summariser")
-        # MODIFIED: Increased window width for the sidebar
         self.root.geometry("950x900")
         
         self.root.drop_target_register(DND_FILES) # Enable file dropping on the window.
@@ -238,6 +237,48 @@ class ChatSummarizerApp:
         self.thumbnail_photo_images = []
         self.summary_photo_images = []
 
+    # --- NEW METHODS FOR SCROLLING ---
+    def _scroll_canvas(self, event, canvas):
+        """Generic mousewheel scroll handler for a given canvas widget."""
+        # This function handles the actual scrolling action on a canvas.
+        # It's designed to be cross-platform, checking for different OS behaviors.
+        if sys.platform == "win32":
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        elif sys.platform == "darwin": # macOS
+             canvas.yview_scroll(int(-1 * event.delta), "units")
+        else: # Linux
+            if event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
+
+    def _on_global_mousewheel(self, event):
+        """
+        Handles mouse wheel scrolling globally and directs it to the
+        canvas widget currently under the mouse pointer.
+        """
+        # This function determines which widget the mouse is currently over.
+        widget_under_cursor = self.root.winfo_containing(event.x_root, event.y_root)
+        if widget_under_cursor is None:
+            return
+
+        # It then walks up the widget tree from the cursor's position.
+        # If it finds one of our scrollable canvases (summary or image),
+        # it calls the _scroll_canvas method to scroll that specific canvas.
+        current_widget = widget_under_cursor
+        while current_widget is not None:
+            if current_widget == self.summary_canvas:
+                self._scroll_canvas(event, self.summary_canvas)
+                return
+            if hasattr(self, 'image_canvas') and current_widget == self.image_canvas:
+                self._scroll_canvas(event, self.image_canvas)
+                return
+            
+            # Stop searching if we've reached the top-level frame.
+            if current_widget == self.main_frame:
+                break
+                
+            current_widget = getattr(current_widget, 'master', None)
 
     def detect_system_theme(self):
         """Tries to detect the system's dark mode setting on Windows."""
@@ -389,35 +430,35 @@ class ChatSummarizerApp:
         self.summarize_button.pack(fill=tk.X, pady=10, expand=False)
         self.progress_bar = ttk.Progressbar(self.main_frame, mode='indeterminate')
         
-        # --- MODIFIED: New Content Frame to hold summary and media side-by-side ---
         content_frame = ttk.Frame(self.main_frame)
         content_frame.pack(fill="both", expand=True, pady=(0, 10))
         content_frame.grid_rowconfigure(0, weight=1)
-        content_frame.grid_columnconfigure(0, weight=1) # Summary area expands
-        content_frame.grid_columnconfigure(1, weight=0) # Media area has fixed width
+        content_frame.grid_columnconfigure(0, weight=1) 
+        content_frame.grid_columnconfigure(1, weight=0)
 
         # This setup creates a scrollable frame for the summary output.
         self.summary_container = ttk.Frame(content_frame)
-        self.summary_container.grid(row=0, column=0, sticky="nsew") # Place in the expanding column
-        summary_canvas = tk.Canvas(self.summary_container, relief="solid", borderwidth=1)
-        summary_scrollbar = ttk.Scrollbar(self.summary_container, orient="vertical", command=summary_canvas.yview)
-        self.summary_frame = tk.Frame(summary_canvas) # The actual content goes in this frame.
+        self.summary_container.grid(row=0, column=0, sticky="nsew")
+        # MODIFIED: Changed 'summary_canvas' to 'self.summary_canvas' to make it accessible class-wide
+        self.summary_canvas = tk.Canvas(self.summary_container, relief="solid", borderwidth=1)
+        summary_scrollbar = ttk.Scrollbar(self.summary_container, orient="vertical", command=self.summary_canvas.yview)
+        self.summary_frame = tk.Frame(self.summary_canvas)
         summary_scrollbar.pack(side="right", fill="y")
-        summary_canvas.pack(side="left", fill="both", expand=True)
-        summary_canvas.create_window((0, 0), window=self.summary_frame, anchor="nw")
-        summary_canvas.configure(yscrollcommand=summary_scrollbar.set)
-        self.summary_frame.bind("<Configure>", lambda e: summary_canvas.configure(scrollregion=summary_canvas.bbox("all")))
+        self.summary_canvas.pack(side="left", fill="both", expand=True)
+        self.summary_canvas.create_window((0, 0), window=self.summary_frame, anchor="nw")
+        self.summary_canvas.configure(yscrollcommand=summary_scrollbar.set)
+        self.summary_frame.bind("<Configure>", lambda e: self.summary_canvas.configure(scrollregion=self.summary_canvas.bbox("all")))
 
         # This setup creates a VERTICALLY scrollable frame for media thumbnails on the side.
         self.image_preview_frame = ttk.Frame(content_frame)
-        self.image_preview_frame.grid(row=0, column=1, sticky="ns", padx=(10, 0)) # Place in the fixed-width column
-        self.image_canvas = tk.Canvas(self.image_preview_frame, relief="solid", borderwidth=1, width=120) # Set width, not height
-        img_scrollbar = ttk.Scrollbar(self.image_preview_frame, orient="vertical", command=self.image_canvas.yview) # Vertical scrollbar
+        self.image_preview_frame.grid(row=0, column=1, sticky="ns", padx=(10, 0))
+        self.image_canvas = tk.Canvas(self.image_preview_frame, relief="solid", borderwidth=1, width=120)
+        img_scrollbar = ttk.Scrollbar(self.image_preview_frame, orient="vertical", command=self.image_canvas.yview)
         self.image_frame = ttk.Frame(self.image_canvas, style="ImageFrame.TFrame")
         self.image_canvas.create_window((0, 0), window=self.image_frame, anchor="nw")
-        self.image_canvas.configure(yscrollcommand=img_scrollbar.set) # Use yscrollcommand
-        img_scrollbar.pack(side="right", fill="y") # Pack scrollbar to the right
-        self.image_canvas.pack(side="left", fill="both", expand=True) # Pack canvas to the left
+        self.image_canvas.configure(yscrollcommand=img_scrollbar.set)
+        img_scrollbar.pack(side="right", fill="y")
+        self.image_canvas.pack(side="left", fill="both", expand=True)
         self.image_frame.bind("<Configure>", lambda e: self.image_canvas.configure(scrollregion=self.image_canvas.bbox("all")))
 
         self.status_var = tk.StringVar(value="Ready")
@@ -426,6 +467,14 @@ class ChatSummarizerApp:
         
         self.chat_file_path, self.all_messages, self.image_list, self.video_list = None, [], [], []
         self.toggle_media_count_menu()
+
+        # MODIFIED: Bind the global mousewheel event to our new handler function.
+        # This is done at the end of setup to ensure all widgets have been created.
+        self.root.bind_all("<MouseWheel>", self._on_global_mousewheel)
+        # For Linux scrolling
+        self.root.bind_all("<Button-4>", self._on_global_mousewheel)
+        self.root.bind_all("<Button-5>", self._on_global_mousewheel)
+
 
     def toggle_media_count_menu(self):
         """Enables/disables the media count dropdown based on settings and file content."""
@@ -507,7 +556,6 @@ class ChatSummarizerApp:
                         photo_img = ImageTk.PhotoImage(img)
                         self.thumbnail_photo_images.append(photo_img) # Keep a reference.
                         img_label = tk.Label(self.image_frame, image=photo_img, bg=self.colors['dark' if self.dark_mode.get() else 'light']['entry_bg'], cursor="hand2")
-                        # MODIFIED: Pack to the top for vertical layout
                         img_label.pack(side=tk.TOP, padx=5, pady=5)
                         img_label.bind("<Button-1>", lambda e, name=img_name: self.open_media_external(name))
                 for vid_name in self.video_list: # Create thumbnails for videos.
@@ -516,7 +564,6 @@ class ChatSummarizerApp:
                         photo_img = ImageTk.PhotoImage(thumb_img)
                         self.thumbnail_photo_images.append(photo_img) # Keep a reference.
                         vid_label = tk.Label(self.image_frame, image=photo_img, bg=self.colors['dark' if self.dark_mode.get() else 'light']['entry_bg'], cursor="hand2")
-                        # MODIFIED: Pack to the top for vertical layout
                         vid_label.pack(side=tk.TOP, padx=5, pady=5)
                         vid_label.bind("<Button-1>", lambda e, name=vid_name: self.open_media_external(name))
         except Exception as e:
@@ -658,19 +705,16 @@ class ChatSummarizerApp:
         
         self.status_var.set("Summary generated successfully.")
         
-        # MODIFIED: Dynamically resize the window to fit the generated summary.
         self.root.update_idletasks()
         controls_height = self.controls_frame.winfo_reqheight()
         button_height = self.summarize_button.winfo_reqheight()
         summary_height = self.summary_frame.winfo_reqheight()
         status_bar_height = self.status_bar.winfo_reqheight()
         
-        # The image preview is on the side, so its height doesn't add to the total vertical stack.
-        total_content_height = controls_height + button_height + summary_height + status_bar_height + 80 # Padding and margins
+        total_content_height = controls_height + button_height + summary_height + status_bar_height + 80
         max_height = self.root.winfo_screenheight()
         new_height = min(max(900, total_content_height), int(max_height * 0.95))
         
-        # Use new window width
         self.root.geometry(f"950x{new_height}")
 
     def finalize_summary_ui(self):
