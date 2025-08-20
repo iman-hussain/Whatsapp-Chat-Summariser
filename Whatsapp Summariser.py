@@ -223,6 +223,7 @@ class ChatSummarizerApp:
 
         self.dark_mode = tk.BooleanVar(value=self.detect_system_theme())
         
+        self.slider_style_created = False
         self.setup_styles()
         self.setup_ui()
         self.apply_theme()
@@ -260,6 +261,9 @@ class ChatSummarizerApp:
                 return
             if hasattr(self, 'image_canvas') and current_widget == self.image_canvas:
                 self._scroll_canvas(event, self.image_canvas)
+                return
+            if hasattr(self, 'graphs_canvas') and current_widget == self.graphs_canvas:
+                self._scroll_canvas(event, self.graphs_canvas)
                 return
             if current_widget == self.main_frame: break
             current_widget = getattr(current_widget, 'master', None)
@@ -299,19 +303,27 @@ class ChatSummarizerApp:
         self.style.configure("TCheckbutton", background=colors['bg'], foreground=colors['fg'])
         self.style.map('TCheckbutton', indicatorcolor=[('selected', colors['btn_bg'])])
         self.style.configure("ImageFrame.TFrame", background=colors['entry_bg'])
-        self.style.configure("TPanedWindow", background=colors['bg'])
-        self.style.configure("TPanedWindow.Sash", background=colors['bg'])
         
+        self.content_pane.config(bg=colors['bg'], sashrelief=tk.RAISED)
+
         self.style.configure("Horizontal.TScale", background=colors['bg'])
-        self.style.map('Horizontal.TScale', background=[('active', colors['bg'])], troughcolor=[('!disabled', colors['entry_bg'])])
         self.slider_thumb_img = self.create_slider_thumb(colors['btn_bg'])
-        self.style.element_create('custom.Scale.slider', 'image', self.slider_thumb_img, border=8, sticky='nswe')
-        self.style.layout('Horizontal.TScale', [('Horizontal.Scale.trough', {'sticky': 'nswe'}), ('custom.Scale.slider', {'side': 'left', 'sticky': ''})])
+        
+        if not self.slider_style_created:
+            self.style.element_create('custom.Scale.slider', 'image', self.slider_thumb_img, border=8, sticky='nswe')
+            self.style.layout('Horizontal.TScale', [('Horizontal.Scale.trough', {'sticky': 'nswe'}), ('custom.Scale.slider', {'side': 'left', 'sticky': ''})])
+            self.slider_style_created = True
+        else:
+            self.style.element_options('custom.Scale.slider', image=self.slider_thumb_img)
 
         self.summary_frame.config(bg=colors['summary_bg'])
         self.summary_canvas.config(bg=colors['summary_bg'])
         self.image_canvas.config(bg=colors['entry_bg'])
         
+        if hasattr(self, 'graphs_canvas'):
+            self.graphs_canvas.config(bg=colors['bg'])
+            self.graphs_frame.config(bg=colors['bg'])
+
         for child in self.summary_frame.winfo_children():
             if isinstance(child, (tk.Label, tk.Frame)):
                 child.config(bg=colors['summary_bg'])
@@ -434,10 +446,10 @@ class ChatSummarizerApp:
         self.image_canvas.pack(side="left", fill="both", expand=True)
         self.image_frame.bind("<Configure>", lambda e: self.image_canvas.configure(scrollregion=self.image_canvas.bbox("all")))
 
-        content_pane = ttk.PanedWindow(content_frame, orient=tk.HORIZONTAL)
-        content_pane.pack(side=tk.LEFT, fill="both", expand=True)
+        self.content_pane = tk.PanedWindow(content_frame, orient=tk.HORIZONTAL, sashwidth=8)
+        self.content_pane.pack(side=tk.LEFT, fill="both", expand=True)
 
-        self.summary_container = ttk.Frame(content_pane)
+        self.summary_container = tk.Frame(self.content_pane)
         self.summary_canvas = tk.Canvas(self.summary_container, relief="solid", borderwidth=1)
         summary_scrollbar = ttk.Scrollbar(self.summary_container, orient="vertical", command=self.summary_canvas.yview)
         self.summary_frame = tk.Frame(self.summary_canvas)
@@ -448,11 +460,19 @@ class ChatSummarizerApp:
         self.summary_frame.bind("<Configure>", lambda e: self.summary_canvas.configure(scrollregion=self.summary_canvas.bbox("all")))
         self.summary_canvas.bind("<Configure>", self.on_summary_canvas_resize)
 
-        self.graphs_frame = ttk.Frame(content_pane)
+        self.graphs_container = tk.Frame(self.content_pane)
+        self.graphs_canvas = tk.Canvas(self.graphs_container, relief="flat", borderwidth=0)
+        graphs_scrollbar = ttk.Scrollbar(self.graphs_container, orient="vertical", command=self.graphs_canvas.yview)
+        self.graphs_frame = tk.Frame(self.graphs_canvas)
+        graphs_scrollbar.pack(side="right", fill="y")
+        self.graphs_canvas.pack(side="left", fill="both", expand=True)
+        self.graphs_canvas.create_window((0, 0), window=self.graphs_frame, anchor="nw")
+        self.graphs_canvas.configure(yscrollcommand=graphs_scrollbar.set)
+        self.graphs_frame.bind("<Configure>", lambda e: self.graphs_canvas.configure(scrollregion=self.graphs_canvas.bbox("all")))
         self.graphs_frame.bind("<Configure>", self.on_graph_frame_resize)
 
-        content_pane.add(self.summary_container, weight=2)
-        content_pane.add(self.graphs_frame, weight=3)
+        self.content_pane.add(self.summary_container, minsize=300)
+        self.content_pane.add(self.graphs_container, minsize=450)
 
         self.status_var = tk.StringVar(value="Ready")
         self.status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=5)
@@ -468,10 +488,10 @@ class ChatSummarizerApp:
         self.graph_context_menu = tk.Menu(self.root, tearoff=0)
         self.graph_context_menu.add_command(label="Save Image...", command=self.save_graphs)
 
-    def on_summary_canvas_resize(self, event):
+    def on_summary_canvas_resize(self, event=None):
         """Updates the wraplength of all labels in the summary frame."""
         self.summary_canvas.configure(scrollregion=self.summary_canvas.bbox("all"))
-        width = event.width - 20
+        width = self.summary_canvas.winfo_width() - 20
         for label in self.summary_labels:
             label.config(wraplength=width)
 
@@ -515,7 +535,7 @@ class ChatSummarizerApp:
         if self.graph_canvas:
             self.graph_canvas.get_tk_widget().destroy()
 
-        if self.graphs_frame.winfo_width() <= 1 or self.graphs_frame.winfo_height() <= 1:
+        if self.graphs_frame.winfo_width() <= 1:
             return
             
         theme = 'dark' if self.dark_mode.get() else 'light'
@@ -524,7 +544,7 @@ class ChatSummarizerApp:
         
         dpi = 100
         width_inches = self.graphs_frame.winfo_width() / dpi
-        height_inches = self.graphs_frame.winfo_height() / dpi
+        height_inches = 12
 
         self.figure = Figure(figsize=(width_inches, height_inches), dpi=dpi, facecolor=bg_color)
         
@@ -539,7 +559,7 @@ class ChatSummarizerApp:
         self.plot_activity_heatmap(ax3, messages, fg_color)
         self.plot_sentiments(ax4, summary_data, fg_color)
 
-        self.figure.tight_layout(pad=2.5)
+        self.figure.tight_layout(pad=3.0)
 
         self.graph_canvas = FigureCanvasTkAgg(self.figure, master=self.graphs_frame)
         self.graph_canvas.draw()
@@ -863,7 +883,7 @@ class ChatSummarizerApp:
         
         self.root.update_idletasks()
         # Trigger a configure event to set initial wrapping
-        self.on_summary_canvas_resize(tk.Event())
+        self.on_summary_canvas_resize()
         
     def finalize_summary_ui(self):
         """Hides the progress bar and starts the button cooldown."""
