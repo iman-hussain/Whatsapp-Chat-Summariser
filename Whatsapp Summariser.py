@@ -24,7 +24,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-import matplotlib.patheffects as path_effects # For text outlines
 
 # --- Core Functions ---
 
@@ -203,13 +202,28 @@ def get_summary_from_gemini(api_key, chat_text, detail_level, zip_path=None, ima
         elif "is not found for API version" in error_str: return {"error": f"The model name is incorrect or not supported. ({e})"}
         else: return {"error": f"An error occurred with the Gemini API: {e}"}
 
+def analyse_chat_participants(messages):
+    """Finds the top talker and top media sender from the messages."""
+    if not messages: return None, None
+    message_counts, image_counts = {}, {}
+    for msg in messages:
+        author = msg['author']
+        if not msg['image_filename'] and not msg['video_filename']:
+            message_counts[author] = message_counts.get(author, 0) + 1
+        if msg['image_filename'] or msg['video_filename']:
+            image_counts[author] = image_counts.get(author, 0) + 1
+    top_yapper = max(message_counts, key=message_counts.get) if message_counts else "N/A"
+    top_photographer = max(image_counts, key=image_counts.get) if image_counts else "N/A"
+    return top_yapper, top_photographer
+
+
 # --- GUI Application ---
 
 class ChatSummarizerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("WhatsApp Chat Summariser")
-        self.root.geometry("1600x900")
+        self.root.geometry("1400x900")
         
         self.root.drop_target_register(DND_FILES)
         self.root.dnd_bind('<<Drop>>', self.handle_drop)
@@ -223,7 +237,6 @@ class ChatSummarizerApp:
 
         self.dark_mode = tk.BooleanVar(value=self.detect_system_theme())
         
-        self.slider_style_created = False
         self.setup_styles()
         self.setup_ui()
         self.apply_theme()
@@ -234,6 +247,7 @@ class ChatSummarizerApp:
         self.summary_photo_images = []
         self.graph_canvas = None
         self.resize_timer = None
+        # NEW: Keep references for dynamic text wrapping and saving graphs
         self.summary_labels = []
         self.figure = None
 
@@ -261,9 +275,6 @@ class ChatSummarizerApp:
                 return
             if hasattr(self, 'image_canvas') and current_widget == self.image_canvas:
                 self._scroll_canvas(event, self.image_canvas)
-                return
-            if hasattr(self, 'graphs_canvas') and current_widget == self.graphs_canvas:
-                self._scroll_canvas(event, self.graphs_canvas)
                 return
             if current_widget == self.main_frame: break
             current_widget = getattr(current_widget, 'master', None)
@@ -304,26 +315,16 @@ class ChatSummarizerApp:
         self.style.map('TCheckbutton', indicatorcolor=[('selected', colors['btn_bg'])])
         self.style.configure("ImageFrame.TFrame", background=colors['entry_bg'])
         
-        self.content_pane.config(bg=colors['bg'], sashrelief=tk.RAISED)
-
         self.style.configure("Horizontal.TScale", background=colors['bg'])
+        self.style.map('Horizontal.TScale', background=[('active', colors['bg'])], troughcolor=[('!disabled', colors['entry_bg'])])
         self.slider_thumb_img = self.create_slider_thumb(colors['btn_bg'])
-        
-        if not self.slider_style_created:
-            self.style.element_create('custom.Scale.slider', 'image', self.slider_thumb_img, border=8, sticky='nswe')
-            self.style.layout('Horizontal.TScale', [('Horizontal.Scale.trough', {'sticky': 'nswe'}), ('custom.Scale.slider', {'side': 'left', 'sticky': ''})])
-            self.slider_style_created = True
-        else:
-            self.style.element_options('custom.Scale.slider', image=self.slider_thumb_img)
+        self.style.element_create('custom.Scale.slider', 'image', self.slider_thumb_img, border=8, sticky='nswe')
+        self.style.layout('Horizontal.TScale', [('Horizontal.Scale.trough', {'sticky': 'nswe'}), ('custom.Scale.slider', {'side': 'left', 'sticky': ''})])
 
         self.summary_frame.config(bg=colors['summary_bg'])
         self.summary_canvas.config(bg=colors['summary_bg'])
         self.image_canvas.config(bg=colors['entry_bg'])
         
-        if hasattr(self, 'graphs_canvas'):
-            self.graphs_canvas.config(bg=colors['bg'])
-            self.graphs_frame.config(bg=colors['bg'])
-
         for child in self.summary_frame.winfo_children():
             if isinstance(child, (tk.Label, tk.Frame)):
                 child.config(bg=colors['summary_bg'])
@@ -431,12 +432,14 @@ class ChatSummarizerApp:
         self.summarize_button.pack(fill=tk.X, pady=10, expand=False)
         self.progress_bar = ttk.Progressbar(self.main_frame, mode='indeterminate')
         
+        # MODIFIED: Use a main frame with pack for layout control
         content_frame = ttk.Frame(self.main_frame)
         content_frame.pack(fill="both", expand=True, pady=(0, 10))
 
+        # MODIFIED: Image preview frame is now packed to the left with a fixed width
         self.image_preview_frame = ttk.Frame(content_frame, width=140)
         self.image_preview_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
-        self.image_preview_frame.pack_propagate(False)
+        self.image_preview_frame.pack_propagate(False) # Prevents frame from shrinking
         self.image_canvas = tk.Canvas(self.image_preview_frame, relief="solid", borderwidth=1)
         img_scrollbar = ttk.Scrollbar(self.image_preview_frame, orient="vertical", command=self.image_canvas.yview)
         self.image_frame = ttk.Frame(self.image_canvas, style="ImageFrame.TFrame")
@@ -446,10 +449,11 @@ class ChatSummarizerApp:
         self.image_canvas.pack(side="left", fill="both", expand=True)
         self.image_frame.bind("<Configure>", lambda e: self.image_canvas.configure(scrollregion=self.image_canvas.bbox("all")))
 
-        self.content_pane = tk.PanedWindow(content_frame, orient=tk.HORIZONTAL, sashwidth=8)
-        self.content_pane.pack(side=tk.LEFT, fill="both", expand=True)
+        # MODIFIED: PanedWindow now only contains the resizable summary and graph panes
+        content_pane = ttk.PanedWindow(content_frame, orient=tk.HORIZONTAL)
+        content_pane.pack(side=tk.LEFT, fill="both", expand=True)
 
-        self.summary_container = tk.Frame(self.content_pane)
+        self.summary_container = ttk.Frame(content_pane)
         self.summary_canvas = tk.Canvas(self.summary_container, relief="solid", borderwidth=1)
         summary_scrollbar = ttk.Scrollbar(self.summary_container, orient="vertical", command=self.summary_canvas.yview)
         self.summary_frame = tk.Frame(self.summary_canvas)
@@ -458,21 +462,14 @@ class ChatSummarizerApp:
         self.summary_canvas.create_window((0, 0), window=self.summary_frame, anchor="nw")
         self.summary_canvas.configure(yscrollcommand=summary_scrollbar.set)
         self.summary_frame.bind("<Configure>", lambda e: self.summary_canvas.configure(scrollregion=self.summary_canvas.bbox("all")))
+        # NEW: Bind resize event to update text wrapping
         self.summary_canvas.bind("<Configure>", self.on_summary_canvas_resize)
 
-        self.graphs_container = tk.Frame(self.content_pane)
-        self.graphs_canvas = tk.Canvas(self.graphs_container, relief="flat", borderwidth=0)
-        graphs_scrollbar = ttk.Scrollbar(self.graphs_container, orient="vertical", command=self.graphs_canvas.yview)
-        self.graphs_frame = tk.Frame(self.graphs_canvas)
-        graphs_scrollbar.pack(side="right", fill="y")
-        self.graphs_canvas.pack(side="left", fill="both", expand=True)
-        self.graphs_canvas.create_window((0, 0), window=self.graphs_frame, anchor="nw")
-        self.graphs_canvas.configure(yscrollcommand=graphs_scrollbar.set)
-        self.graphs_frame.bind("<Configure>", lambda e: self.graphs_canvas.configure(scrollregion=self.graphs_canvas.bbox("all")))
+        self.graphs_frame = ttk.Frame(content_pane)
         self.graphs_frame.bind("<Configure>", self.on_graph_frame_resize)
 
-        self.content_pane.add(self.summary_container, minsize=300)
-        self.content_pane.add(self.graphs_container, minsize=450)
+        content_pane.add(self.summary_container, weight=3)
+        content_pane.add(self.graphs_frame, weight=2)
 
         self.status_var = tk.StringVar(value="Ready")
         self.status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=5)
@@ -485,13 +482,17 @@ class ChatSummarizerApp:
         self.root.bind_all("<Button-4>", self._on_global_mousewheel)
         self.root.bind_all("<Button-5>", self._on_global_mousewheel)
 
+        # NEW: Setup right-click menu for graphs
         self.graph_context_menu = tk.Menu(self.root, tearoff=0)
         self.graph_context_menu.add_command(label="Save Image...", command=self.save_graphs)
 
-    def on_summary_canvas_resize(self, event=None):
+    # --- NEW and MODIFIED: UI Behavior and Graphing Functions ---
+    def on_summary_canvas_resize(self, event):
         """Updates the wraplength of all labels in the summary frame."""
+        # Update the scroll region
         self.summary_canvas.configure(scrollregion=self.summary_canvas.bbox("all"))
-        width = self.summary_canvas.winfo_width() - 20
+        # Update text wrapping
+        width = event.width - 20  # Subtract padding
         for label in self.summary_labels:
             label.config(wraplength=width)
 
@@ -525,7 +526,7 @@ class ChatSummarizerApp:
         if not filepath:
             return
         try:
-            self.figure.savefig(filepath, dpi=300, facecolor=self.figure.get_facecolor())
+            self.figure.savefig(filepath, dpi=300)
             self.status_var.set(f"Graph saved to {os.path.basename(filepath)}")
         except Exception as e:
             messagebox.showerror("Save Error", f"Failed to save graph: {e}")
@@ -535,7 +536,7 @@ class ChatSummarizerApp:
         if self.graph_canvas:
             self.graph_canvas.get_tk_widget().destroy()
 
-        if self.graphs_frame.winfo_width() <= 1:
+        if self.graphs_frame.winfo_width() <= 1 or self.graphs_frame.winfo_height() <= 1:
             return
             
         theme = 'dark' if self.dark_mode.get() else 'light'
@@ -544,73 +545,46 @@ class ChatSummarizerApp:
         
         dpi = 100
         width_inches = self.graphs_frame.winfo_width() / dpi
-        height_inches = 12
+        height_inches = self.graphs_frame.winfo_height() / dpi
 
+        # MODIFIED: Store figure in self.figure
         self.figure = Figure(figsize=(width_inches, height_inches), dpi=dpi, facecolor=bg_color)
         
-        gs = self.figure.add_gridspec(4, 1, height_ratios=[4, 4, 3, 4])
-        ax1 = self.figure.add_subplot(gs[0, 0])
-        ax2 = self.figure.add_subplot(gs[1, 0])
-        ax3 = self.figure.add_subplot(gs[2, 0])
-        ax4 = self.figure.add_subplot(gs[3, 0])
-        
+        ax1 = self.figure.add_subplot(311)
         self.plot_message_distribution(ax1, messages, fg_color)
-        self.plot_text_vs_media(ax2, messages, fg_color)
-        self.plot_activity_heatmap(ax3, messages, fg_color)
-        self.plot_sentiments(ax4, summary_data, fg_color)
+        
+        ax2 = self.figure.add_subplot(312)
+        self.plot_activity_heatmap(ax2, messages, fg_color)
 
-        self.figure.tight_layout(pad=3.0)
+        ax3 = self.figure.add_subplot(313)
+        self.plot_sentiments(ax3, summary_data, fg_color)
+
+        self.figure.tight_layout(pad=2.0)
 
         self.graph_canvas = FigureCanvasTkAgg(self.figure, master=self.graphs_frame)
         self.graph_canvas.draw()
         widget = self.graph_canvas.get_tk_widget()
-        widget.config(bg=bg_color)
         widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        # NEW: Bind right-click event to the new canvas widget
         widget.bind("<Button-3>", self.show_graph_context_menu)
 
     def plot_message_distribution(self, ax, messages, fg_color):
         """Plots a pie chart of messages sent by each author."""
-        text_fx = [path_effects.withStroke(linewidth=1, foreground='white')]
         authors = [msg['author'] for msg in messages]
         author_counts = pd.Series(authors).value_counts()
         
-        threshold = 0.05 * len(messages)
+        threshold = 0.10 * len(messages)
         main_authors = author_counts[author_counts >= threshold]
         other_count = author_counts[author_counts < threshold].sum()
         if other_count > 0:
             main_authors['Other'] = other_count
             
-        wedges, texts, autotexts = ax.pie(main_authors, autopct='%1.1f%%', startangle=90,
-                                          textprops={'color': 'black', 'fontsize': 10}, radius=1.2)
-        
-        leg = ax.legend(wedges, main_authors.index, title="Authors", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
-        leg.get_title().set_color(fg_color)
-        for text in leg.get_texts():
-            text.set_color(fg_color)
-
-        plt.setp(autotexts, size=10, weight="bold", path_effects=text_fx)
-        title = ax.set_title('Message Distribution', color=fg_color, fontsize=16)
-        title.set_path_effects(text_fx)
-
-    def plot_text_vs_media(self, ax, messages, fg_color):
-        """Plots a pie chart comparing text and media message counts."""
-        text_fx = [path_effects.withStroke(linewidth=1, foreground='white')]
-        media_count = sum(1 for msg in messages if msg['image_filename'] or msg['video_filename'])
-        text_count = len(messages) - media_count
-        
-        counts = [text_count, media_count]
-        labels = ['Text', 'Media']
-        
-        wedges, texts, autotexts = ax.pie(counts, labels=labels, autopct='%1.1f%%', startangle=90,
-                                          textprops={'color': 'black', 'fontsize': 10}, radius=1.2)
-        plt.setp(autotexts, size=10, weight="bold", path_effects=text_fx)
-        plt.setp(texts, path_effects=text_fx, fontsize=14)
-        title = ax.set_title('Message Types', color=fg_color, fontsize=16)
-        title.set_path_effects(text_fx)
+        ax.pie(main_authors, labels=main_authors.index, autopct='%1.1f%%', startangle=90, textprops={'color': fg_color})
+        ax.set_title('Message Distribution', color=fg_color)
+        ax.axis('equal')
 
     def plot_activity_heatmap(self, ax, messages, fg_color):
         """Plots a heatmap of message activity by day and hour."""
-        text_fx = [path_effects.withStroke(linewidth=1, foreground='white')]
         df = pd.DataFrame(messages)
         df['hour'] = df['timestamp'].dt.hour
         df['day_of_week'] = df['timestamp'].dt.day_name()
@@ -621,34 +595,21 @@ class ChatSummarizerApp:
         
         ax.imshow(activity, cmap='viridis', aspect='auto')
         ax.set_xticks(np.arange(len(days)))
-        xticklabels = ax.set_xticklabels(days, rotation=45, ha="right", color='black', fontsize=11)
-        
-        hours = np.arange(0, 24, 2)
-        ax.set_yticks(hours)
-        yticklabels = ax.set_yticklabels(hours, color='black', fontsize=10)
-        
-        for label in xticklabels + yticklabels:
-            label.set_path_effects(text_fx)
-            
-        title = ax.set_title('Message Activity Heatmap', color=fg_color, fontsize=16)
-        title.set_path_effects(text_fx)
+        ax.set_xticklabels(days, rotation=45, ha="right", color=fg_color)
+        ax.set_yticks(np.arange(24))
+        ax.set_yticklabels(np.arange(24), color=fg_color)
+        ax.set_title('Message Activity Heatmap', color=fg_color)
         
     def plot_sentiments(self, ax, summary_data, fg_color):
         """Plots a bar chart of message sentiments."""
-        text_fx = [path_effects.withStroke(linewidth=1, foreground='white')]
         sentiments = summary_data.get('sentiments', [])
         if sentiments:
             df = pd.DataFrame(sentiments).sort_values('count', ascending=False)
             ax.bar(df['sentiment'], df['count'], color='#0078D7')
         
-        title = ax.set_title('Message Sentiments', color=fg_color, fontsize=16)
-        title.set_path_effects(text_fx)
-        ax.tick_params(axis='x', labelrotation=45, colors='black', labelsize=11)
-        ax.tick_params(axis='y', colors='black', labelsize=10)
-
-        for label in ax.get_xticklabels() + ax.get_yticklabels():
-            label.set_path_effects(text_fx)
-
+        ax.set_title('Message Sentiments', color=fg_color)
+        ax.tick_params(axis='x', labelrotation=45, colors=fg_color)
+        ax.tick_params(axis='y', colors=fg_color)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.spines['bottom'].set_color(fg_color)
@@ -795,6 +756,9 @@ class ChatSummarizerApp:
                 self.last_summary_data = summary_data 
                 
                 if summary_data and 'error' not in summary_data:
+                    top_yapper, top_photographer = analyse_chat_participants(filtered_messages)
+                    summary_data['top_yapper'] = top_yapper
+                    summary_data['top_photographer'] = top_photographer
                     self.root.after(0, self.display_graphs, filtered_messages, summary_data)
 
         except Exception as e:
@@ -829,13 +793,14 @@ class ChatSummarizerApp:
         """Builds the summary view from the structured JSON data."""
         for widget in self.summary_frame.winfo_children(): widget.destroy()
         self.summary_photo_images.clear()
+        # NEW: Clear the list of labels for wrapping
         self.summary_labels.clear()
         theme = 'dark' if self.dark_mode.get() else 'light'
         colors = self.colors[theme]
 
         if not data or 'error' in data:
             error_msg = data.get('error', 'An unknown error occurred.')
-            label = tk.Label(self.summary_frame, text=error_msg, justify="left", bg=colors['summary_bg'], fg='red', font=('Helvetica', 12))
+            label = tk.Label(self.summary_frame, text=error_msg, justify="left", bg=colors['summary_bg'], fg='red', font=('Helvetica', 10))
             label.pack(pady=10, padx=10, anchor='w')
             self.summary_labels.append(label)
             return
@@ -847,10 +812,11 @@ class ChatSummarizerApp:
                 author, content = part.get('author', 'System'), part.get('content', '')
                 key_msg_frame = tk.Frame(self.summary_frame, bg=colors['key_msg_bg'], relief="solid", borderwidth=1)
                 key_msg_frame.pack(pady=10, padx=10, fill='x')
-                author_label = tk.Label(key_msg_frame, text=f"{author} said:", justify="left", bg=colors['key_msg_bg'], fg=colors['fg'], font=('Helvetica', 11, 'italic'))
+                author_label = tk.Label(key_msg_frame, text=f"{author} said:", justify="left", bg=colors['key_msg_bg'], fg=colors['fg'], font=('Helvetica', 9, 'italic'))
                 author_label.pack(pady=(5, 0), padx=10, anchor='w')
-                content_label = tk.Label(key_msg_frame, text=content, justify="left", bg=colors['key_msg_bg'], fg=colors['fg'], font=('Helvetica', 14, 'bold'))
+                content_label = tk.Label(key_msg_frame, text=content, justify="left", bg=colors['key_msg_bg'], fg=colors['fg'], font=('Helvetica', 12, 'bold'))
                 content_label.pack(pady=(0, 5), padx=10, anchor='w')
+                # Add labels to the list for wrapping
                 self.summary_labels.append(author_label)
                 self.summary_labels.append(content_label)
             
@@ -865,25 +831,35 @@ class ChatSummarizerApp:
 
             else:
                 content = part.get('content', '')
-                content_label = tk.Label(self.summary_frame, text=content, justify="left", bg=colors['summary_bg'], fg=colors['fg'], font=('Helvetica', 12))
+                content_label = tk.Label(self.summary_frame, text=content, justify="left", bg=colors['summary_bg'], fg=colors['fg'], font=('Helvetica', 10))
                 content_label.pack(pady=5, padx=10, anchor='w')
                 self.summary_labels.append(content_label)
 
         bullets = data.get('bullet_points', [])
         if bullets:
-            title = tk.Label(self.summary_frame, text="Key Points:", justify="left", bg=colors['summary_bg'], fg=colors['fg'], font=('Helvetica', 13, 'bold'))
+            title = tk.Label(self.summary_frame, text="Key Points:", justify="left", bg=colors['summary_bg'], fg=colors['fg'], font=('Helvetica', 11, 'bold'))
             title.pack(pady=(15, 5), padx=10, anchor='w')
             self.summary_labels.append(title)
             for point in bullets:
-                bullet = tk.Label(self.summary_frame, text=f"• {point}", justify="left", bg=colors['summary_bg'], fg=colors['fg'], font=('Helvetica', 12))
+                bullet = tk.Label(self.summary_frame, text=f"• {point}", justify="left", bg=colors['summary_bg'], fg=colors['fg'], font=('Helvetica', 10))
                 bullet.pack(pady=2, padx=20, anchor='w')
                 self.summary_labels.append(bullet)
         
+        analysis_title = tk.Label(self.summary_frame, text="Chat Analysis:", justify="left", bg=colors['summary_bg'], fg=colors['fg'], font=('Helvetica', 11, 'bold'))
+        analysis_title.pack(pady=(15, 5), padx=10, anchor='w')
+        self.summary_labels.append(analysis_title)
+        
+        table_frame = tk.Frame(self.summary_frame, bg=colors['summary_bg'])
+        table_frame.pack(pady=5, padx=20, anchor='w')
+        tk.Label(table_frame, text="Top Yapper:", font=('Helvetica', 10, 'bold'), bg=colors['summary_bg'], fg=colors['fg']).grid(row=0, column=0, sticky='w', padx=(0,10))
+        tk.Label(table_frame, text=data.get('top_yapper', 'N/A'), font=('Helvetica', 10), bg=colors['summary_bg'], fg=colors['fg']).grid(row=0, column=1, sticky='w')
+        tk.Label(table_frame, text="Top Photographer:", font=('Helvetica', 10, 'bold'), bg=colors['summary_bg'], fg=colors['fg']).grid(row=1, column=0, sticky='w', padx=(0,10))
+        tk.Label(table_frame, text=data.get('top_photographer', 'N/A'), font=('Helvetica', 10), bg=colors['summary_bg'], fg=colors['fg']).grid(row=1, column=1, sticky='w')
+        
         self.status_var.set("Summary generated successfully.")
         
-        self.root.update_idletasks()
         # Trigger a configure event to set initial wrapping
-        self.on_summary_canvas_resize()
+        self.on_summary_canvas_resize(tk.Event())
         
     def finalize_summary_ui(self):
         """Hides the progress bar and starts the button cooldown."""
