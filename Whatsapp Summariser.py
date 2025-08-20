@@ -223,7 +223,8 @@ class ChatSummarizerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("WhatsApp Chat Summariser")
-        self.root.geometry("1200x900")
+        # MODIFIED: Increased initial window size for better layout
+        self.root.geometry("1400x900")
         
         self.root.drop_target_register(DND_FILES)
         self.root.dnd_bind('<<Drop>>', self.handle_drop)
@@ -246,6 +247,8 @@ class ChatSummarizerApp:
         self.thumbnail_photo_images = []
         self.summary_photo_images = []
         self.graph_canvas = None
+        # NEW: Timer for debouncing graph redraws on resize
+        self.resize_timer = None
 
     def _scroll_canvas(self, event, canvas):
         """Generic mousewheel scroll handler for a given canvas widget."""
@@ -319,8 +322,6 @@ class ChatSummarizerApp:
 
         self.summary_frame.config(bg=colors['summary_bg'])
         self.image_canvas.config(bg=colors['entry_bg'])
-        # FIXED: The graphs_frame is a ttk.Frame, so it's styled automatically by the "TFrame" style.
-        # The incorrect .config(bg=...) call has been removed.
         
         for child in self.summary_frame.winfo_children():
             if isinstance(child, (tk.Label, tk.Frame)):
@@ -331,7 +332,6 @@ class ChatSummarizerApp:
         for child in self.image_frame.winfo_children():
             if isinstance(child, tk.Label): child.config(bg=colors['entry_bg'])
             
-        # FIXED: Redraw graphs only if data exists to prevent errors on startup.
         if self.all_messages and self.last_summary_data:
             self.display_graphs(self.all_messages, self.last_summary_data)
 
@@ -430,15 +430,11 @@ class ChatSummarizerApp:
         self.summarize_button.pack(fill=tk.X, pady=10, expand=False)
         self.progress_bar = ttk.Progressbar(self.main_frame, mode='indeterminate')
         
-        content_frame = ttk.Frame(self.main_frame)
-        content_frame.pack(fill="both", expand=True, pady=(0, 10))
-        content_frame.grid_rowconfigure(0, weight=1)
-        content_frame.grid_columnconfigure(0, weight=1) 
-        content_frame.grid_columnconfigure(1, weight=0) 
-        content_frame.grid_columnconfigure(2, weight=0) 
+        # MODIFIED: Replaced Frame with PanedWindow for resizable columns
+        content_pane = ttk.PanedWindow(self.main_frame, orient=tk.HORIZONTAL)
+        content_pane.pack(fill="both", expand=True, pady=(0, 10))
 
-        self.summary_container = ttk.Frame(content_frame)
-        self.summary_container.grid(row=0, column=0, sticky="nsew")
+        self.summary_container = ttk.Frame(content_pane)
         self.summary_canvas = tk.Canvas(self.summary_container, relief="solid", borderwidth=1)
         summary_scrollbar = ttk.Scrollbar(self.summary_container, orient="vertical", command=self.summary_canvas.yview)
         self.summary_frame = tk.Frame(self.summary_canvas)
@@ -448,8 +444,7 @@ class ChatSummarizerApp:
         self.summary_canvas.configure(yscrollcommand=summary_scrollbar.set)
         self.summary_frame.bind("<Configure>", lambda e: self.summary_canvas.configure(scrollregion=self.summary_canvas.bbox("all")))
 
-        self.image_preview_frame = ttk.Frame(content_frame)
-        self.image_preview_frame.grid(row=0, column=1, sticky="ns", padx=(10, 0))
+        self.image_preview_frame = ttk.Frame(content_pane)
         self.image_canvas = tk.Canvas(self.image_preview_frame, relief="solid", borderwidth=1, width=120)
         img_scrollbar = ttk.Scrollbar(self.image_preview_frame, orient="vertical", command=self.image_canvas.yview)
         self.image_frame = ttk.Frame(self.image_canvas, style="ImageFrame.TFrame")
@@ -459,8 +454,14 @@ class ChatSummarizerApp:
         self.image_canvas.pack(side="left", fill="both", expand=True)
         self.image_frame.bind("<Configure>", lambda e: self.image_canvas.configure(scrollregion=self.image_canvas.bbox("all")))
 
-        self.graphs_frame = ttk.Frame(content_frame)
-        self.graphs_frame.grid(row=0, column=2, sticky="ns", padx=(10, 0))
+        self.graphs_frame = ttk.Frame(content_pane)
+        # NEW: Bind resize event to the graphs frame
+        self.graphs_frame.bind("<Configure>", self.on_graph_frame_resize)
+
+        # MODIFIED: Add frames to the PanedWindow with initial weights
+        content_pane.add(self.summary_container, weight=4)
+        content_pane.add(self.image_preview_frame, weight=1)
+        content_pane.add(self.graphs_frame, weight=3)
 
         self.status_var = tk.StringVar(value="Ready")
         self.status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=5)
@@ -473,16 +474,37 @@ class ChatSummarizerApp:
         self.root.bind_all("<Button-4>", self._on_global_mousewheel)
         self.root.bind_all("<Button-5>", self._on_global_mousewheel)
 
+    # --- NEW: Graph Resizing and Redrawing Logic ---
+    def on_graph_frame_resize(self, event):
+        """Debounces resize events to redraw graphs efficiently."""
+        if self.resize_timer:
+            self.root.after_cancel(self.resize_timer)
+        self.resize_timer = self.root.after(250, self.redraw_graphs)
+
+    def redraw_graphs(self):
+        """Helper function to call the main graph display function."""
+        if self.all_messages and self.last_summary_data:
+            self.display_graphs(self.all_messages, self.last_summary_data)
+
     def display_graphs(self, messages, summary_data):
-        """Clears old graphs and displays new ones based on message data."""
+        """Clears old graphs and displays new ones, sized to the container."""
         if self.graph_canvas:
             self.graph_canvas.get_tk_widget().destroy()
 
+        # MODIFIED: Make graph size dynamic based on the frame's current size
+        # This check prevents errors if the frame hasn't been drawn yet.
+        if self.graphs_frame.winfo_width() <= 1 or self.graphs_frame.winfo_height() <= 1:
+            return
+            
         theme = 'dark' if self.dark_mode.get() else 'light'
         bg_color = self.colors[theme]['bg']
         fg_color = self.colors[theme]['fg']
         
-        fig = Figure(figsize=(4, 8), dpi=100, facecolor=bg_color)
+        dpi = 100
+        width_inches = self.graphs_frame.winfo_width() / dpi
+        height_inches = self.graphs_frame.winfo_height() / dpi
+
+        fig = Figure(figsize=(width_inches, height_inches), dpi=dpi, facecolor=bg_color)
         
         ax1 = fig.add_subplot(311)
         self.plot_message_distribution(ax1, messages, fg_color)
@@ -493,7 +515,7 @@ class ChatSummarizerApp:
         ax3 = fig.add_subplot(313)
         self.plot_sentiments(ax3, summary_data, fg_color)
 
-        fig.tight_layout(pad=3.0)
+        fig.tight_layout(pad=2.0)
 
         self.graph_canvas = FigureCanvasTkAgg(fig, master=self.graphs_frame)
         self.graph_canvas.draw()
@@ -530,7 +552,6 @@ class ChatSummarizerApp:
         ax.set_yticks(np.arange(24))
         ax.set_yticklabels(np.arange(24), color=fg_color)
         ax.set_title('Message Activity Heatmap', color=fg_color)
-        # FIXED: Removed redundant plt.setp calls
         
     def plot_sentiments(self, ax, summary_data, fg_color):
         """Plots a bar chart of message sentiments."""
@@ -787,7 +808,8 @@ class ChatSummarizerApp:
         max_height = self.root.winfo_screenheight()
         new_height = min(max(900, total_content_height), int(max_height * 0.95))
         
-        self.root.geometry(f"1200x{new_height}")
+        # The width is now dynamic, so we don't set it here.
+        self.root.geometry(f"1400x{new_height}")
 
     def finalize_summary_ui(self):
         """Hides the progress bar and starts the button cooldown."""
